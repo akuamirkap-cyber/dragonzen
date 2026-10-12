@@ -216,4 +216,76 @@ export class ZenAudio {
       oo.stop(t + 3.1);
     });
   }
+
+  missionComplete() {
+    const ctx = this.ctx;
+    if (!ctx || !this.master || !this.delay || this.muted) return;
+    const t = ctx.currentTime;
+    // Ascending celebratory pentatonic harp
+    const notes = [523.25, 659.25, 783.99, 1046.5, 1318.51];
+    notes.forEach((f, i) => {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(f, t + i * 0.07);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t + i * 0.07);
+      g.gain.linearRampToValueAtTime(0.14, t + i * 0.07 + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.07 + 1.6);
+      o.connect(g);
+      g.connect(this.master!);
+      g.connect(this.delay!);
+      o.start(t + i * 0.07);
+      o.stop(t + i * 0.07 + 1.7);
+    });
+  }
+
+  levelUp() {
+    const ctx = this.ctx;
+    if (!ctx || !this.master || !this.delay || this.muted) return;
+    const t = ctx.currentTime;
+    // Grand triumphant chords (Alto's Odyssey level up chime)
+    const chords = [
+      [392.0, 523.25, 659.25],
+      [440.0, 587.33, 880.0],
+      [523.25, 659.25, 1046.5, 1318.51],
+    ];
+    chords.forEach((chord, ci) => {
+      chord.forEach((f) => {
+        const o = ctx.createOscillator();
+        o.type = ci === 2 ? 'triangle' : 'sine';
+        o.frequency.setValueAtTime(f, t + ci * 0.22);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0, t + ci * 0.22);
+        g.gain.linearRampToValueAtTime(0.16, t + ci * 0.22 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + ci * 0.22 + 2.8);
+        o.connect(g);
+        g.connect(this.master!);
+        g.connect(this.delay!);
+        o.start(t + ci * 0.22);
+        o.stop(t + ci * 0.22 + 2.9);
+      });
+    });
+  }
+
+  biomeEntered() {
+    const ctx = this.ctx;
+    if (!ctx || !this.master || !this.delay || this.muted) return;
+    const t = ctx.currentTime;
+    // Deep mystical Tibetan singing bowl resonance
+    const freqs = [146.83, 293.66, 440.0, 587.33];
+    freqs.forEach((f, i) => {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(f, t);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.12 / (1 + i * 0.4), t + 0.15);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 4.0);
+      o.connect(g);
+      g.connect(this.master!);
+      g.connect(this.delay!);
+      o.start(t);
+      o.stop(t + 4.1);
+    });
+  }
 }

@@ -71,7 +71,7 @@ interface Ring { x: number; y: number; r: number; state: number; t: number }
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; max: number; size: number; color: string; kind: number; ph: number }
 interface FText { x: number; y: number; text: string; life: number; big: boolean }
 
-export interface GameStats { distance: number; rings: number; score: number; bestCombo: number }
+export interface GameStats { distance: number; rings: number; score: number; bestCombo: number; maxSpeed: string }
 export interface GameCallbacks { onGameOver: (s: GameStats) => void }
 
 export class Game {
@@ -104,27 +104,66 @@ export class Game {
   nextSpawn = 0;
   startX = 0;
   ringScore = 0; ringCount = 0; combo = 0; bestCombo = 0;
-  boost = 0; skimT = 0; skimShown = false;
+  flowTimer = 0; flowBank = 0; maxSpeedReached = 300;
+  boost = 0; boostEnergy = 0; skimT = 0; skimShown = false;
   deadT = 0; shake = 0; slowmo = 1; reported = false;
   autoDive = false;
   playT = 0;
   bumpCd = 0;
+  zoom = 0.62;
   stars: { x: number; y: number; s: number; p: number }[] = [];
   clouds: { x: number; y: number; w: number; h: number }[] = [];
+  balloons: { x: number; y: number; r: number; color1: string; color2: string; spd: number; bob: number }[] = [];
+  birds: { x: number; y: number; vx: number; vy: number; flap: number; size: number; near: boolean }[] = [];
+  shootingStars: { x: number; y: number; len: number; vx: number; vy: number; life: number }[] = [];
   phaseOffset = 0;
 
   constructor(canvas: HTMLCanvasElement, cb: GameCallbacks) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d')!;
     this.cb = cb;
-    for (let i = 0; i < 90; i++) this.stars.push({ x: Math.random() * W, y: Math.random() * 520, s: Math.random() * 1.4 + 0.3, p: Math.random() * 6.28 });
-    for (let i = 0; i < 7; i++) this.clouds.push({ x: Math.random() * (W + 400), y: rand(60, 420), w: rand(90, 220), h: rand(10, 22) });
+    for (let i = 0; i < 120; i++) this.stars.push({ x: rand(-100, W + 100), y: rand(-150, 560), s: rand(0.3, 1.8), p: rand(0, 6.28) });
+    for (let i = 0; i < 9; i++) this.clouds.push({ x: rand(-150, W + 450), y: rand(40, 440), w: rand(110, 260), h: rand(12, 26) });
+    const balloonColors = [
+      ['#df654a', '#fae1b8'],
+      ['#3b6885', '#fae7aa'],
+      ['#ad476e', '#fde2d4'],
+      ['#528574', '#fff1d0'],
+      ['#e07a5f', '#f4f1de'],
+      ['#3d405b', '#e07a5f'],
+      ['#81b29a', '#f2cc8f'],
+    ];
+    for (let i = 0; i < 8; i++) {
+      const bc = balloonColors[i % balloonColors.length];
+      this.balloons.push({
+        x: i * 360 + rand(40, 260),
+        y: rand(80, 360),
+        r: rand(24, 46),
+        color1: bc[0],
+        color2: bc[1],
+        spd: rand(0.035, 0.08),
+        bob: Math.random() * 6.28,
+      });
+    }
+    // Sekawanan burung bangau putih (White cranes flying across sky & near dragon)
+    for (let i = 0; i < 14; i++) {
+      const near = i < 5;
+      this.birds.push({
+        x: rand(0, W + 700),
+        y: near ? rand(100, 480) : rand(70, 320),
+        vx: near ? rand(70, 115) : rand(45, 75),
+        vy: rand(-4, 4),
+        flap: Math.random() * 6.28,
+        size: near ? rand(9, 14) : rand(5, 7.5),
+        near,
+      });
+    }
     this.resize();
     if (typeof ResizeObserver !== 'undefined' && canvas.parentElement) {
       this.ro = new ResizeObserver(() => this.resize());
       this.ro.observe(canvas.parentElement);
     }
-    for (let i = 0; i < 80; i++) this.hist.push({ x: -i * 3, y: 320 });
+    for (let i = 0; i < 150; i++) this.hist.push({ x: -i * 3, y: 320 });
   }
 
   resize() {
@@ -156,8 +195,15 @@ export class Game {
   }
 
   setHolding(h: boolean) { this.holding = h; }
-  setTargetY(y: number) { this.targetY = clamp(y, 35, 740); }
-  adjustTargetY(delta: number) { this.targetY = clamp(this.targetY + delta, 35, 740); }
+  setPointerRatio(ratio: number) {
+    const zy = H * 0.5;
+    const screenY = ratio * H;
+    const worldY = zy + (screenY - zy) / Math.max(0.5, this.zoom);
+    const g = groundY(this.dx);
+    this.targetY = clamp(worldY, 35, g - 25);
+  }
+  setTargetY(y: number) { this.setPointerRatio(y / H); }
+  adjustTargetY(delta: number) { this.targetY = clamp(this.targetY + delta, 35, groundY(this.dx) - 25); }
   setMuted(m: boolean) { this.audio.setMuted(m); }
 
   start() {
@@ -166,11 +212,14 @@ export class Game {
     this.rocks = []; this.islands = []; this.rings = []; this.texts = [];
     this.parts = this.parts.filter((p) => p.kind === 2 || p.kind === 3);
     this.dy = 300; this.targetY = 300; this.vy = 0; this.punchScale = 1; this.whooshCd = 0; this.ang = 0.05; this.spd = 300;
+    this.boostEnergy = 0;
+    this.zoom = 0.62;
     this.hist = [];
     for (let i = 0; i < 80; i++) this.hist.push({ x: this.dx - i * 3, y: this.dy });
     this.startX = this.dx;
     this.nextSpawn = this.dx + 650;
     this.ringScore = 0; this.ringCount = 0; this.combo = 0; this.bestCombo = 0;
+    this.flowTimer = 0; this.flowBank = 0; this.maxSpeedReached = 300;
     this.boost = 0; this.skimT = 0; this.deadT = 0; this.shake = 0; this.slowmo = 1; this.reported = false;
     this.playT = 0; this.holding = false;
   }
@@ -295,7 +344,7 @@ export class Game {
       width = 160;
     }
     // Adaptive obstacle spacing: scales with dragon speed so reaction time stays fair and zen
-    const speedRatio = clamp(this.spd / 310, 1, 2.4);
+    const speedRatio = clamp(this.spd / 300, 1, 5.0);
     this.nextSpawn = x + width + rand(280, 420) * speedRatio;
   }
 
@@ -307,7 +356,13 @@ export class Game {
       this.slowmo = lerp(this.slowmo, 1, dt * 0.8);
       if (this.deadT > 1.6 && !this.reported) {
         this.reported = true;
-        this.cb.onGameOver({ distance: this.distanceM(), rings: this.ringCount, score: this.totalScore(), bestCombo: this.bestCombo });
+        this.cb.onGameOver({
+          distance: this.distanceM(),
+          rings: Math.floor(this.ringCount),
+          score: this.totalScore(),
+          bestCombo: this.bestCombo,
+          maxSpeed: `${(this.maxSpeedReached / 300).toFixed(1)}x`,
+        });
       }
     }
     const sdt = dt * this.slowmo;
@@ -317,31 +372,88 @@ export class Game {
     if (this.mode !== 'dead') this.updateDragon(sdt);
     else this.dx += 60 * sdt;
 
+    if (this.spd > this.maxSpeedReached) {
+      this.maxSpeedReached = this.spd;
+    }
+
+    // Graceful combo flow timer & banking
+    if (this.flowTimer > 0) {
+      this.flowTimer -= sdt;
+      if (this.flowTimer <= 0) {
+        if (this.combo > 1 && this.flowBank > 0) {
+          const bankedPoints = Math.floor(this.flowBank * this.combo);
+          this.ringScore += bankedPoints;
+          this.texts.push({ x: this.dx, y: this.dy - 40, text: `Aliran +${bankedPoints} ✦`, life: 1.5, big: true });
+          this.audio.chime(Math.min(this.combo - 1, 8), true);
+        }
+        this.combo = 0;
+        this.flowBank = 0;
+        this.flowTimer = 0;
+      }
+    }
+
+    // Dynamic camera zoom: zoomed out wide (0.62), pulling back even further (0.45) at high speed
+    const speedNorm = clamp((this.spd - 320) / 1680, 0, 1);
+    const targetZoom = lerp(0.62, 0.45, speedNorm);
+    this.zoom = lerp(this.zoom, targetZoom, 1 - Math.exp(-2.5 * dt));
+
     // Dynamic camera lead: reveals more terrain ahead at high flight speeds
-    const lead = clamp((this.spd - 300) / 500, 0, 0.14);
-    this.camX = this.dx - W * (0.32 - lead);
+    const lead = clamp((this.spd - 320) / 1680, 0, 0.24);
+    this.camX = this.dx - W * (0.28 - lead);
     this.shake = Math.max(0, this.shake - dt * 30);
     this.bumpCd = Math.max(0, this.bumpCd - dt);
 
-    if (this.mode === 'playing') {
-      this.playT += dt;
-      while (this.nextSpawn < this.camX + W + 450) this.spawnPattern(this.nextSpawn);
+    // Update birds across sky
+    for (const b of this.birds) {
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      if (b.x > this.camX + W + 650) {
+        b.x = this.camX - 350;
+        b.y = rand(80, 420);
+      }
     }
 
-    // rings anim & magnetic drift
+    // Occasional shooting star across night/dusk sky
+    const { p: curPal } = this.palette();
+    if (curPal.star > 0.08 && Math.random() < dt * 0.45) {
+      this.shootingStars.push({
+        x: this.camX + rand(100, W + 400),
+        y: rand(-80, 220),
+        len: rand(70, 140),
+        vx: rand(-650, -450),
+        vy: rand(200, 320),
+        life: 0.55,
+      });
+    }
+    for (const s of this.shootingStars) {
+      s.life -= dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+    }
+    this.shootingStars = this.shootingStars.filter((s) => s.life > 0);
+
+    if (this.mode === 'playing') {
+      this.playT += dt;
+      while (this.nextSpawn < this.camX + W + 1400) this.spawnPattern(this.nextSpawn);
+    }
+
+    // rings anim
     for (const r of this.rings) r.t += sdt;
 
-    // cleanup
-    const cut = this.camX - 260;
+    // cleanup with generous offscreen margins
+    const cut = this.camX - 600;
     this.rocks = this.rocks.filter((r) => r.x + r.w > cut);
     this.islands = this.islands.filter((r) => r.x + r.r > cut);
     this.rings = this.rings.filter((r) => r.x > cut && !(r.state === 1 && r.t > 1.2));
 
     this.updateParticles(sdt);
-    this.audio.setWind(clamp((this.spd - 150) / 600, 0, 1) * (this.mode === 'dead' ? 0.2 : 1));
+    this.audio.setWind(clamp((this.spd - 150) / 1600, 0, 1) * (this.mode === 'dead' ? 0.2 : 1));
   }
 
   updateDragon(dt: number) {
+    const prevX = this.dx;
+    const prevY = this.dy;
+
     let destY = this.targetY;
     if (this.mode === 'menu') {
       destY = 320 + Math.sin(this.time * 2.2) * 120;
@@ -350,10 +462,11 @@ export class Game {
     const gCurrent = groundY(this.dx);
     destY = clamp(destY, 35, gCurrent - 20);
 
-    // Critically damped spring physics for ultra-smooth, organic dragon flight
+    // Responsive spring physics that stays nimble at higher speeds up to 6x
+    const speedRatio = clamp(this.spd / 300, 1, 6.0);
     const diff = destY - this.dy;
-    const springK = 62;
-    const damping = 15.5;
+    const springK = 62 * Math.min(1.85, Math.sqrt(speedRatio));
+    const damping = 15.5 * Math.min(1.4, Math.sqrt(speedRatio));
     const accel = diff * springK - this.vy * damping;
     this.vy += accel * dt;
     this.dy += this.vy * dt;
@@ -373,61 +486,82 @@ export class Game {
     const targetAng = clamp(Math.atan2(this.vy, this.spd), -0.75, 0.75);
     this.ang += (targetAng - this.ang) * (1 - Math.exp(-12 * dt));
 
-    const d = this.difficulty();
-    const baseSpeed = 320;
-    const comboBonus = Math.min(this.combo * 16, 280);
-    const distBonus = Math.min(this.distanceM() * 0.12, 180);
-    if (this.boost > 0) {
-      this.boost -= dt;
-      const targetSpd = baseSpeed + comboBonus + distBonus + 160 + d * 50;
-      this.spd = lerp(this.spd, targetSpd, 1 - Math.exp(-4 * dt));
-      if (Math.random() < 0.95 && this.body.length > 8) {
-        const b = this.body[Math.floor(Math.random() * this.body.length)];
-        this.parts.push({ x: b.x, y: b.y, vx: rand(-70, -10), vy: rand(-20, 20), life: 0.8, max: 0.8, size: rand(1.4, 3.0), color: 'gold', kind: 0, ph: 0 });
-      }
-    } else {
-      const targetSpd = baseSpeed + comboBonus + distBonus + d * 40;
-      this.spd = lerp(this.spd, targetSpd, 1 - Math.exp(-3 * dt));
-    }
-    this.spd = clamp(this.spd, 220, 880);
+    const BASE_SPEED = 320;
+    const MAX_SPEED = 2000; // 6.0x+ base speed
+    // Each ring collected adds speed substantially faster (+160 spd per ring!)
+    const ringSpeedBonus = Math.floor(this.ringCount) * 160;
+    // Flow chain actively propels cruising speed up towards max speed!
+    const flowSpeedBonus = Math.min(600, Math.max(0, this.combo - 1) * 75);
+    const cruisingSpeed = Math.min(MAX_SPEED, BASE_SPEED + ringSpeedBonus + flowSpeedBonus);
 
-    // Tail stardust trail
-    if (this.body.length > 10 && Math.random() < (this.boost > 0 ? 0.9 : 0.4)) {
+    // Smooth boost energy decay
+    this.boostEnergy = lerp(this.boostEnergy, 0, 1 - Math.exp(-2.0 * dt));
+    if (this.boost > 0) this.boost = Math.max(0, this.boost - dt);
+
+    const desiredSpd = Math.min(MAX_SPEED, cruisingSpeed + this.boostEnergy);
+    // Punchy, exhilarating acceleration curve
+    this.spd = lerp(this.spd, desiredSpd, 1 - Math.exp(-4.2 * dt));
+    this.spd = clamp(this.spd, BASE_SPEED, MAX_SPEED);
+
+    if (this.boost > 0 || this.spd > 520) {
+      if (Math.random() < 0.88 && this.body.length > 8) {
+        const b = this.body[Math.floor(Math.random() * this.body.length)];
+        this.parts.push({ x: b.x, y: b.y, vx: rand(-80, -15), vy: rand(-20, 20), life: 0.8, max: 0.8, size: rand(1.4, 3.2), color: 'gold', kind: 0, ph: 0 });
+      }
+    }
+
+    // Ekor naga: jejak cahaya stardust lembut
+    if (this.body.length > 10 && Math.random() < 0.8) {
       const tail = this.body[this.body.length - 1];
       this.parts.push({
-        x: tail.x + rand(-3, 3),
-        y: tail.y + rand(-3, 3),
-        vx: rand(-60, -20),
+        x: tail.x + rand(-4, 4),
+        y: tail.y + rand(-4, 4),
+        vx: rand(-65, -15),
         vy: rand(-12, 12),
-        life: 0.65,
-        max: 0.65,
-        size: rand(1.2, 2.6),
-        color: this.boost > 0 ? 'gold' : 'petal',
+        life: rand(0.65, 1.15),
+        max: 1.15,
+        size: rand(1.5, 3.4),
+        color: 'stardust',
         kind: 0,
-        ph: Math.random() * 6
+        ph: Math.random() * 6,
       });
     }
 
-    const px = this.dx;
     this.dx += Math.cos(this.ang) * this.spd * dt;
 
-    // selancar angin dekat tanah
+    // selancar angin dekat tanah (feeds flow & speed!)
     const alt = groundY(this.dx) - this.dy;
     if (alt < 70 && alt > 0) {
       const f = 1 - alt / 70;
       this.skimT += dt;
-      if (this.mode === 'playing') this.ringScore += f * dt * 12;
-      if (Math.random() < 0.65) {
-        this.parts.push({ x: this.dx - 10, y: groundY(this.dx) - 2, vx: rand(-120, -40), vy: rand(-60, -10), life: 0.7, max: 0.7, size: rand(1.5, 3), color: 'dust', kind: 1, ph: 0 });
+      if (this.mode === 'playing') this.ringScore += f * dt * 15;
+      if (Math.random() < 0.7) {
+        this.parts.push({
+          x: this.dx - 10,
+          y: groundY(this.dx) - 2,
+          vx: rand(-130, -40),
+          vy: rand(-60, -10),
+          life: 0.7,
+          max: 0.7,
+          size: rand(1.6, 3.4),
+          color: 'gold',
+          kind: 1,
+          ph: 0
+        });
       }
-      if (this.skimT > 0.3 && !this.skimShown && this.mode === 'playing') {
-        this.skimShown = true;
-        this.texts.push({ x: this.dx, y: this.dy - 35, text: 'Selancar Angin ✦', life: 1.3, big: false });
-        this.ringScore += 5;
+      // Every 0.55s of surfing continuously feeds into flow combo!
+      if (this.skimT >= 0.55 && this.mode === 'playing') {
+        this.skimT = 0;
+        this.combo++;
+        this.bestCombo = Math.max(this.bestCombo, this.combo);
+        this.flowTimer = 3.0;
+        this.flowBank += 25;
+        this.boostEnergy = Math.min(320, this.boostEnergy + 70);
+        this.texts.push({ x: this.dx, y: this.dy - 35, text: `Selancar Angin ✦ ×${this.combo}`, life: 1.25, big: false });
+        this.audio.whoosh(0.7);
       }
     } else {
-      this.skimT = 0;
-      this.skimShown = false;
+      this.skimT = Math.max(0, this.skimT - dt * 1.5);
     }
 
     // tanah
@@ -455,27 +589,30 @@ export class Game {
 
     if (this.mode !== 'playing') return;
 
-    // Dynamic ring magnetic attraction (scales with speed for effortless collection)
-    const speedBonus = Math.max(0, this.spd - 310);
-    const magnetRadius = 110 + speedBonus * 0.14;
-    const magnetForce = 110 + speedBonus * 0.35;
-    for (const r of this.rings) {
-      if (r.state === 0) {
-        const dist = Math.hypot(r.x - this.dx, r.y - this.dy);
-        if (dist < magnetRadius) {
-          const pull = (1 - dist / magnetRadius) * magnetForce * dt;
-          r.y += (this.dy - r.y) * pull;
-        }
-      }
-    }
-
-    // cincin collection
+    // Stable golden rings: anchored in place without jumping or jittering
     for (const r of this.rings) {
       if (r.state !== 0) continue;
-      if (px < r.x && this.dx >= r.x) {
-        const dy = Math.abs(this.dy - r.y);
-        if (dy < r.r * 0.95) this.collect(r, dy);
-        else { r.state = 2; r.t = 0; this.combo = 0; }
+
+      // Proximity check in case dragon head intersects ring
+      const headDist = Math.hypot(this.dx - r.x, this.dy - r.y);
+      if (headDist <= r.r * 1.05) {
+        this.collect(r, Math.abs(this.dy - r.y));
+        continue;
+      }
+
+      // Continuous collision check as dragon crosses the ring plane
+      if (prevX <= r.x && this.dx >= r.x) {
+        const t = clamp((r.x - prevX) / Math.max(0.001, this.dx - prevX), 0, 1);
+        const crossY = prevY + (this.dy - prevY) * t;
+        const dy = Math.abs(crossY - r.y);
+        if (dy <= r.r * 1.15) {
+          this.collect(r, dy);
+        } else {
+          r.state = 2; // missed
+          r.t = 0;
+          // Shorten flow timer on missed ring to give a brief window to save flow with wind surfing
+          this.flowTimer = Math.min(this.flowTimer, 1.2);
+        }
       }
     }
 
@@ -513,13 +650,17 @@ export class Game {
     this.combo++;
     this.ringCount++;
     this.bestCombo = Math.max(this.bestCombo, this.combo);
+    this.flowTimer = 3.2; // 3.2s grace to link next action
     const perfect = dy < r.r * 0.35;
-    this.spd += perfect ? 165 : 120;
-    this.boost = perfect ? 1.85 : 1.35;
-    this.punchScale = perfect ? 1.045 : 1.026;
+    this.flowBank += perfect ? 40 : 25;
+    
+    // Smooth, potent boost energy impulse (+160 for perfect, +100 normal)
+    this.boostEnergy = Math.min(350, this.boostEnergy + (perfect ? 160 : 100));
+    this.boost = perfect ? 1.6 : 1.1;
+    this.punchScale = perfect ? 1.05 : 1.028;
     const pts = 10 * this.combo + (perfect ? 20 : 0);
     this.ringScore += pts;
-    this.audio.chime(this.combo - 1, perfect);
+    this.audio.chime(Math.min(this.combo - 1, 9), perfect);
 
     const count = perfect ? 34 : 24;
     for (let i = 0; i < count; i++) {
@@ -538,29 +679,34 @@ export class Game {
         ph: Math.random() * 6
       });
     }
-    this.texts.push({ x: r.x, y: r.y - r.r - 12, text: `+${pts}`, life: 1.2, big: false });
+
+    this.texts.push({ x: r.x, y: r.y - r.r - 12, text: `+${pts} (Aliran ×${this.combo})`, life: 1.25, big: false });
     if (perfect) this.texts.push({ x: r.x + 8, y: r.y - r.r - 38, text: 'Sempurna! ✦', life: 1.4, big: true });
-    else if (this.combo >= 2) this.texts.push({ x: r.x + 8, y: r.y - r.r - 38, text: `Kombo ×${this.combo}`, life: 1.25, big: true });
+    else if (this.combo >= 2) this.texts.push({ x: r.x + 8, y: r.y - r.r - 38, text: `Aliran ×${this.combo}`, life: 1.25, big: true });
   }
 
   graze(p: Vec, pushYDir: number) {
     this.bumpCd = 0.55;
-    this.shake = 5;
+    this.shake = 3;
+    this.combo++;
+    this.bestCombo = Math.max(this.bestCombo, this.combo);
+    this.flowTimer = 3.2;
+    this.flowBank += 30;
+    this.boostEnergy = Math.min(350, this.boostEnergy + 110);
+    this.dy += pushYDir * 18;
+    this.vy = pushYDir * 140;
     this.audio.bump();
-    this.combo = Math.max(1, Math.floor(this.combo * 0.7));
-    this.dy += pushYDir * 20;
-    this.vy = pushYDir * 160;
-    this.spd = Math.max(260, this.spd - 70);
-    this.texts.push({ x: p.x, y: p.y - 28, text: 'Terelak! ✦', life: 1.1, big: false });
-    for (let i = 0; i < 16; i++) {
+    this.audio.chime(Math.min(this.combo, 8), true);
+    this.texts.push({ x: p.x, y: p.y - 28, text: `Terelak Berani! ✦ ×${this.combo}`, life: 1.3, big: true });
+    for (let i = 0; i < 18; i++) {
       this.parts.push({
         x: p.x,
         y: p.y,
-        vx: rand(-140, 20),
+        vx: rand(-140, 30),
         vy: rand(-80, 80),
-        life: 0.65,
-        max: 0.65,
-        size: rand(1.6, 3.5),
+        life: rand(0.5, 0.9),
+        max: 0.9,
+        size: rand(1.6, 3.2),
         color: 'gold',
         kind: 0,
         ph: Math.random() * 6
@@ -586,7 +732,7 @@ export class Game {
   }
 
   computeBody() {
-    const N = 30, SP = 6.6;
+    const N = 46, SP = 6.2;
     const body: Vec[] = [{ x: this.dx, y: this.dy }];
     let prev = body[0];
     let remain = SP;
@@ -614,14 +760,31 @@ export class Game {
 
   updateParticles(dt: number) {
     const { p: pal } = this.palette();
-    // ambient
+    // Ambient poetic particles: kelopak bunga sakura, debu gurun keemasan, lentera malam
     const night = pal.star;
-    if (Math.random() < dt * 7) {
-      if (night > 0.5 && Math.random() < 0.6) {
-        this.parts.push({ x: this.camX + rand(0, W + 200), y: rand(80, 650), vx: rand(-15, 15), vy: rand(-15, 5), life: 6, max: 6, size: rand(1.2, 2.4), color: 'fly', kind: 2, ph: Math.random() * 6 });
+    if (Math.random() < dt * 8) {
+      if (night > 0.55 && Math.random() < 0.6) {
+        // Kunang-kunang malam
+        this.parts.push({ x: this.camX + rand(0, W + 300), y: rand(80, 650), vx: rand(-15, 15), vy: rand(-15, 5), life: 6, max: 6, size: rand(1.2, 2.4), color: 'fly', kind: 2, ph: Math.random() * 6 });
       } else {
-        this.parts.push({ x: this.camX + W + rand(0, 100), y: rand(-20, 600), vx: rand(-60, -20), vy: rand(15, 40), life: 9, max: 9, size: rand(2, 3.6), color: 'petal', kind: 3, ph: Math.random() * 6 });
+        // Kelopak bunga sakura berguguran ditiup angin
+        this.parts.push({ x: this.camX + W + rand(20, 140), y: rand(-40, 580), vx: rand(-85, -35), vy: rand(18, 45), life: 10, max: 10, size: rand(2.2, 4.2), color: 'petal', kind: 3, ph: Math.random() * 6 });
       }
+    }
+    // Debu gurun keemasan / stardust atmosferik yang terhempas angin
+    if (Math.random() < dt * 9) {
+      this.parts.push({
+        x: this.camX + W + rand(10, 120),
+        y: rand(120, 680),
+        vx: rand(-110, -50),
+        vy: rand(-10, 15),
+        life: rand(4, 7),
+        max: 7,
+        size: rand(1.2, 2.5),
+        color: 'gold-dust',
+        kind: 2,
+        ph: Math.random() * 6,
+      });
     }
     if (night > 0.6 && Math.random() < dt * 0.5) {
       this.parts.push({ x: this.camX + rand(W * 0.3, W + 150), y: rand(560, 680), vx: rand(-8, 8), vy: rand(-18, -10), life: 30, max: 30, size: rand(3, 5), color: 'lantern', kind: 5, ph: Math.random() * 6 });
@@ -653,29 +816,34 @@ export class Game {
     const ctx = this.ctx;
     const s = this.scale * this.dpr;
     ctx.setTransform(s, 0, 0, s, 0, 0);
-    if (this.punchScale > 1.002) {
-      ctx.translate(W * 0.35, H * 0.45);
-      ctx.scale(this.punchScale, this.punchScale);
-      ctx.translate(-W * 0.35, -H * 0.45);
-    }
+
     const { p: pal, i: pi, t: pt } = this.palette();
     const sx = (Math.random() - 0.5) * this.shake;
     const sy = (Math.random() - 0.5) * this.shake;
 
-    // langit
-    const sky = ctx.createLinearGradient(0, 0, 0, H);
+    // Apply camera zoom transform to game world
+    ctx.save();
+    const zx = W * 0.35;
+    const zy = H * 0.5;
+    ctx.translate(zx, zy);
+    ctx.scale(this.zoom * this.punchScale, this.zoom * this.punchScale);
+    ctx.translate(-zx, -zy);
+
+    // langit (full bleed with wide margins for zoom out)
+    const sky = ctx.createLinearGradient(0, -350, 0, H + 350);
     sky.addColorStop(0, rgba(pal.skyTop));
     sky.addColorStop(0.75, rgba(pal.skyBot));
     sky.addColorStop(1, rgba(pal.fog));
     ctx.fillStyle = sky;
-    ctx.fillRect(0, 0, W, H);
+    ctx.fillRect(-350, -450, W + 700, H + 900);
 
     // bintang
     if (pal.star > 0.01) {
       for (const st of this.stars) {
         const a = pal.star * (0.5 + 0.5 * Math.sin(this.time * 1.6 + st.p));
         ctx.fillStyle = `rgba(255,255,255,${a * 0.9})`;
-        const x = ((st.x - this.camX * 0.01) % W + W) % W;
+        const span = W + 450;
+        const x = ((st.x - this.camX * 0.01 + 225) % span + span) % span - 225;
         ctx.fillRect(x, st.y, st.s, st.s);
       }
     }
@@ -687,21 +855,21 @@ export class Game {
     const moonA = lerp(MOON_A[pi], MOON_A[ni], pt);
     const sunX = W * 0.68;
     if (sunA > 0.01) {
-      const gl = ctx.createRadialGradient(sunX, sunY, 10, sunX, sunY, 220);
+      const gl = ctx.createRadialGradient(sunX, sunY, 10, sunX, sunY, 260);
       gl.addColorStop(0, rgba(pal.sun, 0.55 * sunA));
       gl.addColorStop(1, rgba(pal.sun, 0));
       ctx.fillStyle = gl;
-      ctx.fillRect(0, 0, W, H);
+      ctx.fillRect(-350, -450, W + 700, H + 900);
       ctx.fillStyle = rgba(pal.sun, 0.95 * sunA);
       ctx.beginPath(); ctx.arc(sunX, sunY, 40, 0, Math.PI * 2); ctx.fill();
     }
     if (moonA > 0.01) {
       const mx = W * 0.28, my = 150;
-      const gl = ctx.createRadialGradient(mx, my, 5, mx, my, 160);
+      const gl = ctx.createRadialGradient(mx, my, 5, mx, my, 180);
       gl.addColorStop(0, `rgba(210,220,255,${0.35 * moonA})`);
       gl.addColorStop(1, 'rgba(210,220,255,0)');
       ctx.fillStyle = gl;
-      ctx.fillRect(0, 0, W, 400);
+      ctx.fillRect(-350, -450, W + 700, 650);
       ctx.fillStyle = `rgba(240,244,255,${moonA})`;
       ctx.beginPath(); ctx.arc(mx, my, 26, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = rgba(pal.skyTop, moonA);
@@ -710,27 +878,36 @@ export class Game {
 
     // awan
     for (const c of this.clouds) {
-      const span = W + 500;
-      const x = ((c.x - this.camX * 0.08) % span + span) % span - 250;
+      const span = W + 700;
+      const x = ((c.x - this.camX * 0.08 + 350) % span + span) % span - 350;
       ctx.fillStyle = rgba(mix(pal.fog, pal.skyBot, 0.3), 0.5);
       this.pill(x, c.y, c.w, c.h);
       this.pill(x + c.w * 0.2, c.y - c.h * 0.7, c.w * 0.5, c.h);
     }
 
+    // Bintang jatuh (shooting stars) melintasi langit malam & senja
+    this.drawShootingStars();
+
     ctx.save();
     ctx.translate(sx, sy);
 
-    // pegunungan
-    this.layer(0.06, 470, 200, 0.3, pal.far, pal.fog, 0.45, false);
-    this.layer(0.16, 560, 170, 1.7, pal.mid, pal.fog, 0.4, false);
-    this.layer(0.38, 640, 120, 4.2, pal.near, pal.fog, 0.3, true);
+    // Pegunungan jauh dengan siluet pagoda kuno di cakrawala
+    this.layer(0.06, 470, 200, 0.3, pal.far, pal.fog, 0.45, false, true, sunA);
 
-    // kabut bawah
-    const fogG = ctx.createLinearGradient(0, 520, 0, 720);
-    fogG.addColorStop(0, rgba(pal.fog, 0));
-    fogG.addColorStop(1, rgba(pal.fog, 0.35));
-    ctx.fillStyle = fogG;
-    ctx.fillRect(0, 520, W, 200);
+    // Balon udara panas berukuran besar melayang perlahan di cakrawala (Alto's Odyssey hot air balloons)
+    this.drawBalloons(pal, sunA);
+
+    // Pegunungan tengah dengan puing kuil/pagoda kuno di puncak bukit batu yang diterpa cahaya matahari
+    this.layer(0.16, 560, 170, 1.7, pal.mid, pal.fog, 0.4, false, true, sunA);
+
+    // Sekawanan burung bangau putih terbang di cakrawala (distant cranes)
+    this.drawBirds(pal, false);
+
+    // Pegunungan dekat dengan pepohonan pinus
+    this.layer(0.38, 640, 120, 4.2, pal.near, pal.fog, 0.3, true, false, sunA);
+
+    // Kabut lembut yang bergulung di lembah bawah (rolling valley fog)
+    this.drawValleyFog(pal);
 
     // ---- dunia ----
     ctx.save();
@@ -745,8 +922,10 @@ export class Game {
 
     for (const r of this.rings) this.drawRing(r, pal, true);
     for (const p of this.parts) if (p.kind === 1 || p.kind === 0) this.drawParticle(p, pal);
-    if (this.mode === 'playing') this.drawGuideReticle(pal);
+    if (this.mode === 'playing') this.drawGuideReticle();
     if (this.mode !== 'dead') this.drawDragon(pal);
+    // Sekawanan burung bangau putih terbang bersama naga (near cranes)
+    this.drawBirds(pal, true);
     for (const r of this.rings) this.drawRing(r, pal, false);
     for (const p of this.parts) if (p.kind === 2 || p.kind === 3 || p.kind === 4 || p.kind === 6) this.drawParticle(p, pal);
 
@@ -762,6 +941,7 @@ export class Game {
     }
     ctx.restore();
     ctx.restore();
+    ctx.restore(); // ends camera zoom transform
 
     // vignette
     const vg = ctx.createRadialGradient(W / 2, H * 0.45, H * 0.3, W / 2, H * 0.5, H * 0.75);
@@ -793,26 +973,117 @@ export class Game {
     ctx.fill();
   }
 
-  layer(par: number, base: number, amp: number, seed: number, col: RGB, fog: RGB, fogAmt: number, trees: boolean) {
+  layer(par: number, base: number, amp: number, seed: number, col: RGB, fog: RGB, fogAmt: number, trees: boolean, ruins = false, sunA = 0) {
     const ctx = this.ctx;
     const off = this.camX * par;
-    const g = ctx.createLinearGradient(0, base - amp, 0, base + 120);
+    const g = ctx.createLinearGradient(0, base - amp, 0, base + 180);
     g.addColorStop(0, rgba(col));
     g.addColorStop(1, rgba(mix(col, fog, fogAmt)));
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.moveTo(-10, H);
-    for (let x = -10; x <= W + 10; x += 6) {
+    ctx.moveTo(-350, H + 400);
+    for (let x = -350; x <= W + 350; x += 6) {
       ctx.lineTo(x, base - ridge(x + off, seed) * amp);
     }
-    ctx.lineTo(W + 10, H);
+    ctx.lineTo(W + 350, H + 400);
     ctx.closePath();
     ctx.fill();
+
+    // Puing kuil & pagoda kuno di puncak bukit batu yang diterpa cahaya matahari
+    if (ruins) {
+      const ruinStep = 440;
+      const rStart = Math.floor((off - 350) / ruinStep) * ruinStep;
+      for (let wx = rStart; wx < off + W + 350; wx += ruinStep) {
+        const hsh = hash(wx * 0.73 + seed * 2.1);
+        if (hsh < 0.32) continue;
+        const x = wx - off;
+        const y = base - ridge(x + off, seed) * amp;
+        const scale = 0.85 + hsh * 0.55;
+        const ruinType = Math.floor(hsh * 3); // 0: Pagoda kuno bertingkat, 1: Gapura kuil kuno runtuh, 2: Stupa batu
+
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(scale, scale);
+
+        ctx.fillStyle = rgba(mix(col, [15, 10, 25], 0.22));
+
+        if (ruinType === 0) {
+          // Pagoda kuno bertingkat 3 (Ancient multi-tier pagoda)
+          ctx.fillRect(-18, -4, 36, 4);
+          ctx.fillRect(-13, -8, 26, 4);
+          // Tingkat 1
+          ctx.fillRect(-8, -20, 16, 12);
+          ctx.beginPath();
+          ctx.moveTo(-18, -19); ctx.quadraticCurveTo(0, -23, 18, -19);
+          ctx.lineTo(13, -24); ctx.lineTo(-13, -24); ctx.closePath(); ctx.fill();
+          // Tingkat 2
+          ctx.fillRect(-6, -34, 12, 10);
+          ctx.beginPath();
+          ctx.moveTo(-15, -33); ctx.quadraticCurveTo(0, -37, 15, -33);
+          ctx.lineTo(10, -38); ctx.lineTo(-10, -38); ctx.closePath(); ctx.fill();
+          // Tingkat 3
+          ctx.fillRect(-4, -46, 8, 8);
+          ctx.beginPath();
+          ctx.moveTo(-11, -45); ctx.quadraticCurveTo(0, -49, 11, -45);
+          ctx.lineTo(7, -50); ctx.lineTo(-7, -50); ctx.closePath(); ctx.fill();
+          // Tiang sorin puncak
+          ctx.fillRect(-1, -62, 2, 12);
+          ctx.beginPath(); ctx.arc(0, -62, 2.5, 0, Math.PI * 2); ctx.fill();
+
+          // Diterpa cahaya matahari (Sunlight rim-lighting)
+          if (sunA > 0.05) {
+            ctx.strokeStyle = `rgba(255, 230, 150, ${0.45 * sunA})`;
+            ctx.lineWidth = 1.3;
+            ctx.beginPath();
+            ctx.moveTo(18, -19); ctx.lineTo(13, -24);
+            ctx.moveTo(15, -33); ctx.lineTo(10, -38);
+            ctx.moveTo(11, -45); ctx.lineTo(7, -50);
+            ctx.moveTo(1, -50); ctx.lineTo(1, -62);
+            ctx.stroke();
+          }
+        } else if (ruinType === 1) {
+          // Gapura kuil / Torii kuno lapuk
+          ctx.fillRect(-16, -28, 3.5, 28);
+          ctx.fillRect(12.5, -28, 3.5, 28);
+          ctx.beginPath();
+          ctx.moveTo(-22, -32); ctx.quadraticCurveTo(0, -36, 22, -32);
+          ctx.lineTo(18, -27); ctx.quadraticCurveTo(0, -30, -18, -27);
+          ctx.closePath(); ctx.fill();
+          ctx.fillRect(-26, -10, 4, 10);
+          ctx.fillRect(23, -7, 4, 7);
+
+          if (sunA > 0.05) {
+            ctx.strokeStyle = `rgba(255, 230, 150, ${0.45 * sunA})`;
+            ctx.lineWidth = 1.3;
+            ctx.beginPath();
+            ctx.moveTo(22, -32); ctx.lineTo(18, -27); ctx.lineTo(16, 0);
+            ctx.stroke();
+          }
+        } else {
+          // Stupa batu keramat di puncak tebing
+          ctx.fillRect(-12, -4, 24, 4);
+          ctx.beginPath(); ctx.arc(0, -14, 10, 0, Math.PI * 2); ctx.fill();
+          ctx.fillRect(-4, -28, 8, 14);
+          ctx.fillRect(-1.5, -38, 3, 10);
+          ctx.beginPath(); ctx.arc(0, -38, 2.5, 0, Math.PI * 2); ctx.fill();
+
+          if (sunA > 0.05) {
+            ctx.strokeStyle = `rgba(255, 230, 150, ${0.45 * sunA})`;
+            ctx.lineWidth = 1.3;
+            ctx.beginPath();
+            ctx.arc(0, -14, 10, -Math.PI * 0.4, Math.PI * 0.2);
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+      }
+    }
+
     if (trees) {
       ctx.fillStyle = rgba(mix(col, [0, 0, 0], 0.15));
       const step = 26;
-      const start = Math.floor(off / step) * step;
-      for (let wx = start - step; wx < off + W + step; wx += step) {
+      const start = Math.floor((off - 350) / step) * step;
+      for (let wx = start; wx < off + W + 350; wx += step) {
         const hsh = hash(wx * 0.37 + seed);
         if (hsh < 0.45) continue;
         const x = wx - off + (hash(wx) - 0.5) * 14;
@@ -828,17 +1099,260 @@ export class Game {
     }
   }
 
+  drawShootingStars() {
+    const ctx = this.ctx;
+    for (const s of this.shootingStars) {
+      const a = clamp(s.life / 0.55, 0, 1);
+      const angle = Math.atan2(s.vy, s.vx);
+      const tailX = s.x - Math.cos(angle) * s.len;
+      const tailY = s.y - Math.sin(angle) * s.len;
+      const grad = ctx.createLinearGradient(s.x, s.y, tailX, tailY);
+      grad.addColorStop(0, `rgba(255, 255, 255, ${a * 0.95})`);
+      grad.addColorStop(0.35, `rgba(255, 235, 180, ${a * 0.7})`);
+      grad.addColorStop(1, 'rgba(255, 210, 120, 0)');
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 2.2;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y);
+      ctx.lineTo(tailX, tailY);
+      ctx.stroke();
+
+      ctx.fillStyle = `rgba(255, 255, 255, ${a})`;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  drawBalloons(pal: Palette, sunA: number) {
+    const ctx = this.ctx;
+    const span = W + 700;
+    for (const b of this.balloons) {
+      const bx = ((b.x - this.camX * b.spd + 350) % span + span) % span - 350;
+      const by = b.y + Math.sin(this.time * 0.7 + b.bob) * 14;
+      const r = b.r;
+      const atmosphericFade = 0.88;
+
+      ctx.save();
+      ctx.translate(bx, by);
+
+      // Balon udara siluet Alto's Odyssey
+      const grad = ctx.createLinearGradient(0, -r, 0, r * 1.15);
+      grad.addColorStop(0, rgba(mix(b.color1 as any, pal.fog, 0.28), atmosphericFade));
+      grad.addColorStop(1, rgba(mix(b.color2 as any, pal.fog, 0.45), atmosphericFade));
+      ctx.fillStyle = grad;
+
+      ctx.beginPath();
+      ctx.moveTo(0, -r);
+      ctx.bezierCurveTo(r * 1.15, -r, r * 1.1, r * 0.4, r * 0.42, r * 1.15);
+      ctx.lineTo(-r * 0.42, r * 1.15);
+      ctx.bezierCurveTo(-r * 1.1, r * 0.4, -r * 1.15, -r, 0, -r);
+      ctx.closePath();
+      ctx.fill();
+
+      // Garis belang vertikal kanopi balon (Alto signature stripes)
+      ctx.fillStyle = rgba(mix(b.color2 as any, pal.fog, 0.35), 0.75);
+      ctx.beginPath();
+      ctx.moveTo(0, -r);
+      ctx.bezierCurveTo(r * 0.55, -r * 0.9, r * 0.45, r * 0.3, r * 0.18, r * 1.15);
+      ctx.lineTo(-r * 0.18, r * 1.15);
+      ctx.bezierCurveTo(-r * 0.45, r * 0.3, -r * 0.55, -r * 0.9, 0, -r);
+      ctx.closePath();
+      ctx.fill();
+
+      // Garis terang tengah
+      ctx.fillStyle = rgba(mix(b.color1 as any, pal.fog, 0.2), 0.85);
+      ctx.beginPath();
+      ctx.moveTo(0, -r);
+      ctx.bezierCurveTo(r * 0.2, -r * 0.9, r * 0.15, r * 0.3, r * 0.06, r * 1.15);
+      ctx.lineTo(-r * 0.06, r * 1.15);
+      ctx.bezierCurveTo(-r * 0.15, r * 0.3, -r * 0.2, -r * 0.9, 0, -r);
+      ctx.closePath();
+      ctx.fill();
+
+      // Tutup atas balon
+      ctx.fillStyle = rgba(mix(pal.rock, pal.fog, 0.4), 0.8);
+      ctx.beginPath();
+      ctx.arc(0, -r, r * 0.12, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Pendar nyala api burner balon
+      const flameA = 0.5 + 0.4 * Math.sin(this.time * 12 + b.bob);
+      const fg = ctx.createRadialGradient(0, r * 1.25, 1, 0, r * 1.25, r * 0.6);
+      fg.addColorStop(0, `rgba(255, 190, 80, ${flameA * 0.6})`);
+      fg.addColorStop(1, 'rgba(255, 180, 60, 0)');
+      ctx.fillStyle = fg;
+      ctx.beginPath();
+      ctx.arc(0, r * 1.25, r * 0.6, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = `rgba(255, 235, 140, ${flameA})`;
+      ctx.beginPath();
+      ctx.arc(0, r * 1.25, r * 0.08, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Tali gantung keranjang
+      ctx.strokeStyle = rgba(mix(pal.rock, pal.fog, 0.5), 0.6);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.35, r * 1.15);
+      ctx.lineTo(-r * 0.22, r * 1.45);
+      ctx.moveTo(r * 0.35, r * 1.15);
+      ctx.lineTo(r * 0.22, r * 1.45);
+      ctx.stroke();
+
+      // Keranjang penumpang (Gondola)
+      ctx.fillStyle = rgba(mix(pal.rock, pal.fog, 0.4), 0.9);
+      const bw = r * 0.44, bh = r * 0.26;
+      ctx.fillRect(-bw / 2, r * 1.45, bw, bh);
+
+      // Sisi yang diterpa cahaya matahari
+      if (sunA > 0.08) {
+        ctx.strokeStyle = `rgba(255, 240, 180, ${0.45 * sunA})`;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 0.98, -Math.PI * 0.7, -Math.PI * 0.1);
+        ctx.stroke();
+      }
+
+      ctx.restore();
+    }
+  }
+
+  drawBirds(pal: Palette, nearOnly: boolean) {
+    const ctx = this.ctx;
+    for (const b of this.birds) {
+      if (b.near !== nearOnly) continue;
+      const x = b.x - this.camX * (b.near ? 0.95 : 0.3);
+      const span = W + 700;
+      const sx = ((x + 350) % span + span) % span - 350;
+      const sy = b.y;
+      const sz = b.size;
+
+      // Kepakan sayap bangau anggun
+      const flapAngle = Math.sin(this.time * 6.5 + b.flap) * 0.75;
+
+      ctx.save();
+      ctx.translate(sx, sy);
+
+      // Tubuh putih bangau
+      ctx.fillStyle = b.near ? '#ffffff' : rgba(mix([255, 255, 255], pal.fog, 0.3), 0.9);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, sz, sz * 0.32, 0.12, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Leher panjang & kepala
+      ctx.beginPath();
+      ctx.moveTo(sz * 0.6, 0);
+      ctx.quadraticCurveTo(sz * 1.2, -sz * 0.15, sz * 1.5, -sz * 0.25);
+      ctx.lineTo(sz * 1.4, -sz * 0.1);
+      ctx.closePath();
+      ctx.fill();
+
+      // Mahkota merah di kepala
+      if (b.near) {
+        ctx.fillStyle = '#e2483a';
+        ctx.beginPath();
+        ctx.arc(sz * 1.45, -sz * 0.25, sz * 0.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Kaki ramping menjuntai
+      ctx.strokeStyle = rgba(mix([80, 80, 80], pal.fog, 0.4), 0.75);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(-sz * 0.7, sz * 0.1);
+      ctx.lineTo(-sz * 1.6, sz * 0.25);
+      ctx.stroke();
+
+      // Sayap putih berujung bulu hitam
+      const wingSpan = sz * 1.6;
+      const wingDrop = flapAngle * sz * 1.2;
+
+      // Sayap jauh
+      ctx.fillStyle = b.near ? '#f0f3f8' : rgba(mix([230, 235, 245], pal.fog, 0.3), 0.85);
+      ctx.beginPath();
+      ctx.moveTo(sz * 0.1, -sz * 0.1);
+      ctx.quadraticCurveTo(0, -wingSpan * 0.7 - wingDrop * 0.8, -sz * 0.5, -wingSpan - wingDrop);
+      ctx.quadraticCurveTo(-sz * 0.2, -wingSpan * 0.5 - wingDrop * 0.5, -sz * 0.2, 0);
+      ctx.closePath();
+      ctx.fill();
+
+      // Ujung bulu sayap hitam
+      ctx.fillStyle = '#222226';
+      ctx.beginPath();
+      ctx.moveTo(-sz * 0.35, -wingSpan * 0.75 - wingDrop * 0.85);
+      ctx.lineTo(-sz * 0.5, -wingSpan - wingDrop);
+      ctx.lineTo(-sz * 0.25, -wingSpan * 0.8 - wingDrop * 0.8);
+      ctx.closePath();
+      ctx.fill();
+
+      // Sayap dekat
+      ctx.fillStyle = b.near ? '#ffffff' : rgba(mix([255, 255, 255], pal.fog, 0.3), 0.95);
+      ctx.beginPath();
+      ctx.moveTo(sz * 0.2, 0);
+      ctx.quadraticCurveTo(sz * 0.1, wingSpan * 0.7 + wingDrop, -sz * 0.4, wingSpan + wingDrop);
+      ctx.quadraticCurveTo(-sz * 0.1, wingSpan * 0.5 + wingDrop * 0.6, -sz * 0.15, sz * 0.1);
+      ctx.closePath();
+      ctx.fill();
+
+      // Ujung bulu sayap dekat hitam
+      ctx.fillStyle = '#1e1e22';
+      ctx.beginPath();
+      ctx.moveTo(-sz * 0.25, wingSpan * 0.75 + wingDrop * 0.85);
+      ctx.lineTo(-sz * 0.4, wingSpan + wingDrop);
+      ctx.lineTo(-sz * 0.15, wingSpan * 0.8 + wingDrop * 0.8);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.restore();
+    }
+  }
+
+  drawValleyFog(pal: Palette) {
+    const ctx = this.ctx;
+    const t = this.time;
+    // 3 lapisan kabut bergulung lembut di lembah bawah (Alto's Odyssey valley fog)
+    const fogLayers = [
+      { yBase: 560, amp: 26, speed: 16, alpha: 0.22, waveFreq: 0.0035 },
+      { yBase: 620, amp: 34, speed: 25, alpha: 0.3, waveFreq: 0.0028 },
+      { yBase: 680, amp: 40, speed: 36, alpha: 0.38, waveFreq: 0.0022 },
+    ];
+
+    for (let i = 0; i < fogLayers.length; i++) {
+      const fl = fogLayers[i];
+      const off = this.camX * (0.12 + i * 0.08) + t * fl.speed;
+      const g = ctx.createLinearGradient(0, fl.yBase - fl.amp, 0, fl.yBase + 120);
+      g.addColorStop(0, rgba(pal.fog, 0));
+      g.addColorStop(0.35, rgba(pal.fog, fl.alpha));
+      g.addColorStop(1, rgba(pal.fog, fl.alpha * 0.75));
+      ctx.fillStyle = g;
+
+      ctx.beginPath();
+      ctx.moveTo(-350, H + 400);
+      for (let x = -350; x <= W + 350; x += 12) {
+        const wave = Math.sin((x + off) * fl.waveFreq) * fl.amp
+          + Math.sin((x + off) * fl.waveFreq * 2.3 + 1.2) * (fl.amp * 0.35);
+        ctx.lineTo(x, fl.yBase + wave);
+      }
+      ctx.lineTo(W + 350, H + 400);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
   drawGround(pal: Palette) {
     const ctx = this.ctx;
-    const x0 = this.camX - 20, x1 = this.camX + W + 20;
-    const g = ctx.createLinearGradient(0, 660, 0, H);
+    const x0 = this.camX - 350, x1 = this.camX + W + 500;
+    const g = ctx.createLinearGradient(0, 660, 0, H + 400);
     g.addColorStop(0, rgba(pal.groundTop));
     g.addColorStop(1, rgba(pal.ground));
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.moveTo(x0, H + 20);
+    ctx.moveTo(x0, H + 400);
     for (let x = x0; x <= x1; x += 8) ctx.lineTo(x, groundY(x));
-    ctx.lineTo(x1, H + 20);
+    ctx.lineTo(x1, H + 400);
     ctx.closePath();
     ctx.fill();
     ctx.strokeStyle = rgba(mix(pal.groundTop, pal.fog, 0.45), 0.5);
@@ -999,6 +1513,20 @@ export class Game {
         ctx.fillStyle = rgba(mix(pal.groundTop, pal.fog, 0.6), a * 0.8);
         ctx.fillRect(p.x, p.y, p.size, p.size);
         break;
+      case 'gold-dust': {
+        const ga = Math.min(1, p.life * 0.6) * (0.6 + 0.4 * Math.sin(p.ph * 4));
+        ctx.fillStyle = `rgba(255,225,130,${ga * 0.85})`;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.size * (0.8 + 0.25 * Math.sin(p.ph * 3)), 0, Math.PI * 2); ctx.fill();
+        break;
+      }
+      case 'stardust': {
+        const sa = clamp(p.life / p.max, 0, 1);
+        ctx.fillStyle = `rgba(255,245,215,${sa * 0.95})`;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = `rgba(255,215,110,${sa * 0.35})`;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.size * 2.5, 0, Math.PI * 2); ctx.fill();
+        break;
+      }
       case 'fly': {
         const tw = 0.5 + 0.5 * Math.sin(p.ph * 4);
         const fa = Math.min(1, p.life, (p.max - p.life)) * tw;
@@ -1051,7 +1579,7 @@ export class Game {
     const N = b.length;
     if (N < 3) return;
     const t = this.time;
-    // undulasi
+    // Undulasi luwes seperti kaligrafi tinta
     const pts: Vec[] = [];
     const ups: Vec[] = [];
     for (let i = 0; i < N; i++) {
@@ -1060,18 +1588,68 @@ export class Game {
       const l = Math.hypot(tx, ty) || 1;
       tx /= l; ty /= l;
       const ux = ty, uy = -tx;
-      const amp = (i / N) * 7 * (1 - clamp((this.spd - 300) / 600, 0, 0.6));
-      const o = Math.sin(t * 5.5 - i * 0.42) * amp;
+      const amp = (i / N) * 9.5 * (1 - clamp((this.spd - 300) / 1400, 0, 0.5));
+      const o = Math.sin(t * 5.2 - i * 0.28) * amp;
       pts.push({ x: b[i].x + ux * o, y: b[i].y + uy * o });
       ups.push({ x: ux, y: uy });
     }
     const width = (i: number) => {
       const u = i / (N - 1);
-      const w = 10.5 * Math.pow(1 - u, 0.7) * (u < 0.1 ? 0.8 + u * 2 : 1);
+      const w = 11.2 * Math.pow(1 - u, 0.72) * (u < 0.08 ? 0.8 + u * 2.5 : 1);
       return Math.max(1.2, w);
     };
 
-    // Luminous silk ribbon trail
+    // Selendang Sutra Ekor Naga (Extended Calligraphy Silk Scarf trail like Alto's scarf)
+    // Dynamic length: bertambah panjang seiring peningkatan kecepatan dan kombo aliran
+    const scarfCount = Math.min(this.hist.length, 25 + Math.floor(clamp((this.spd - 300) / 28, 0, 55)) + Math.min(45, this.combo * 5));
+    if (scarfCount > 5) {
+      ctx.save();
+      const scarfPts: Vec[] = [];
+      const tailPt = pts[N - 1];
+      scarfPts.push(tailPt);
+      for (let k = 1; k < scarfCount; k++) {
+        const hp = this.hist[k];
+        if (!hp) break;
+        const wave = Math.sin(t * 7.5 - k * 0.35) * (k / scarfCount) * 7.5;
+        const prevHp = this.hist[Math.max(0, k - 1)];
+        let hdx = prevHp.x - hp.x, hdy = prevHp.y - hp.y;
+        const hl = Math.hypot(hdx, hdy) || 1;
+        hdx /= hl; hdy /= hl;
+        scarfPts.push({ x: hp.x - hdy * wave, y: hp.y + hdx * wave });
+      }
+
+      // Kilau luar selendang sutra kaligrafi
+      ctx.strokeStyle = 'rgba(255, 225, 140, 0.45)';
+      ctx.lineWidth = 14;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      scarfPts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.stroke();
+
+      // Pita sutra utama gradasi emas & merah vermilion
+      const headS = scarfPts[0], endS = scarfPts[scarfPts.length - 1];
+      const sGrad = ctx.createLinearGradient(headS.x, headS.y, endS.x, endS.y);
+      sGrad.addColorStop(0, 'rgba(255, 230, 160, 0.95)');
+      sGrad.addColorStop(0.3, 'rgba(226, 74, 58, 0.85)');
+      sGrad.addColorStop(0.7, 'rgba(156, 34, 52, 0.6)');
+      sGrad.addColorStop(1, 'rgba(255, 215, 120, 0)');
+      ctx.strokeStyle = sGrad;
+      ctx.lineWidth = 9;
+      ctx.beginPath();
+      scarfPts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.stroke();
+
+      // Benang emas bordir di tengah selendang
+      ctx.strokeStyle = 'rgba(255, 245, 205, 0.85)';
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      scarfPts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Luminous silk ribbon trail sepanjang tubuh naga
     ctx.save();
     const ribbonGrad = ctx.createLinearGradient(pts[0].x, pts[0].y, pts[N - 1].x, pts[N - 1].y);
     ribbonGrad.addColorStop(0, 'rgba(255, 235, 170, 0.45)');
@@ -1086,11 +1664,11 @@ export class Game {
     ctx.stroke();
     ctx.restore();
 
-    // aura boost
-    if (this.boost > 0) {
-      const a = clamp(this.boost, 0, 1);
-      ctx.strokeStyle = `rgba(255,220,140,${0.24 * a})`;
-      ctx.lineWidth = 32;
+    // Aura boost & celestial flow aura
+    if (this.boost > 0 || (this.flowTimer > 0 && this.combo >= 2)) {
+      const a = Math.max(clamp(this.boost, 0, 1), clamp(this.flowTimer / 2.5, 0, 1) * Math.min(1, this.combo * 0.25));
+      ctx.strokeStyle = `rgba(255,225,130,${0.28 * a})`;
+      ctx.lineWidth = 26 + Math.min(18, this.combo * 2);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.beginPath();
@@ -1104,12 +1682,13 @@ export class Game {
 
     const red = '#e2483a', dark = '#9c2234', gold = '#ffcf6e';
 
-    // kaki
-    const legAt = [5, 16];
+    // Kaki naga
+    const legAt = [8, 24];
     ctx.strokeStyle = dark;
     ctx.lineWidth = 2.6;
     ctx.lineCap = 'round';
     legAt.forEach((li, k) => {
+      if (li >= N) return;
       const p = pts[li], u = ups[li];
       const sw = Math.sin(t * 6 + k * 2) * 4;
       const fx = p.x - u.x * 12 - 4 + sw, fy = p.y - u.y * 12 + 2;
@@ -1121,9 +1700,9 @@ export class Game {
       ctx.lineWidth = 2.6;
     });
 
-    // sirip punggung
+    // Sirip punggung naga
     ctx.fillStyle = gold;
-    for (let i = 3; i < N - 4; i += 2) {
+    for (let i = 4; i < N - 6; i += 2) {
       const p = pts[i], u = ups[i], w = width(i);
       const q = pts[i + 1];
       const fh = w * 0.7 + 2;
@@ -1134,7 +1713,7 @@ export class Game {
       ctx.fill();
     }
 
-    // ekor jumbai
+    // Ekor jumbai berombak
     const tl = pts[N - 1], tu = ups[N - 1], tp = pts[N - 3];
     const dirx = tl.x - tp.x, diry = tl.y - tp.y;
     const dl = Math.hypot(dirx, diry) || 1;
@@ -1143,15 +1722,16 @@ export class Game {
       const wav = Math.sin(t * 7 + k) * 4;
       ctx.beginPath();
       ctx.moveTo(tl.x + tu.x * 3, tl.y + tu.y * 3);
-      ctx.quadraticCurveTo(tl.x + dirx / dl * 10 + tu.x * (k * 7 + wav), tl.y + diry / dl * 10 + tu.y * (k * 7 + wav), tl.x + dirx / dl * 22 + tu.x * (k * 10 + wav), tl.y + diry / dl * 22 + tu.y * (k * 10 + wav));
+      ctx.quadraticCurveTo(tl.x + dirx / dl * 10 + tu.x * (k * 7 + wav), tl.y + diry / dl * 10 + tu.y * (k * 7 + wav), tl.x + dirx / dl * 24 + tu.x * (k * 11 + wav), tl.y + diry / dl * 24 + tu.y * (k * 11 + wav));
       ctx.quadraticCurveTo(tl.x + dirx / dl * 8, tl.y + diry / dl * 8, tl.x - tu.x * 3, tl.y - tu.y * 3);
       ctx.fill();
     }
 
-    // badan
+    // Badan naga kaligrafi
     const grad = ctx.createLinearGradient(pts[0].x, pts[0].y, pts[N - 1].x, pts[N - 1].y);
     grad.addColorStop(0, red);
-    grad.addColorStop(1, dark);
+    grad.addColorStop(0.6, dark);
+    grad.addColorStop(1, '#661424');
     ctx.fillStyle = grad;
     ctx.beginPath();
     for (let i = 0; i < N; i++) {
@@ -1166,7 +1746,7 @@ export class Game {
     ctx.closePath();
     ctx.fill();
 
-    // perut emas
+    // Perut emas
     ctx.strokeStyle = 'rgba(255,214,130,0.9)';
     ctx.lineWidth = 2.2;
     ctx.beginPath();
@@ -1176,20 +1756,20 @@ export class Game {
       if (i === 1) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.stroke();
-    // sisik
+    // Sisik
     ctx.fillStyle = 'rgba(255,230,180,0.35)';
     for (let i = 2; i < N - 4; i += 2) {
       const w = width(i) * 0.25;
       ctx.beginPath(); ctx.arc(pts[i].x + ups[i].x * w, pts[i].y + ups[i].y * w, 1.3, 0, Math.PI * 2); ctx.fill();
     }
 
-    // kepala
+    // Kepala naga
     const h = pts[0];
     const ha = Math.atan2(pts[0].y - pts[2].y, pts[0].x - pts[2].x);
     ctx.save();
     ctx.translate(h.x, h.y);
     ctx.rotate(ha);
-    // surai
+    // Surai emas
     ctx.fillStyle = gold;
     for (let k = 0; k < 4; k++) {
       const wv = Math.sin(t * 6 + k) * 3;
@@ -1199,13 +1779,13 @@ export class Game {
       ctx.quadraticCurveTo(-12, -4 + k * 3, -2, -2 + k * 2);
       ctx.fill();
     }
-    // tanduk
+    // Tanduk
     ctx.strokeStyle = gold;
     ctx.lineWidth = 2.2;
     ctx.beginPath(); ctx.moveTo(2, -7); ctx.quadraticCurveTo(-8, -14, -18, -18); ctx.stroke();
     ctx.lineWidth = 1.6;
     ctx.beginPath(); ctx.moveTo(-6, -15); ctx.lineTo(-8, -20); ctx.stroke();
-    // kepala
+    // Kepala
     ctx.fillStyle = red;
     ctx.beginPath();
     ctx.moveTo(-6, -9);
@@ -1218,17 +1798,18 @@ export class Game {
     ctx.fill();
     ctx.fillStyle = '#ffd98a';
     ctx.beginPath(); ctx.moveTo(10, 3); ctx.lineTo(22, 1.5); ctx.lineTo(10, 6.5); ctx.closePath(); ctx.fill();
-    // mata
+    // Mata
     ctx.fillStyle = '#fff6dc';
     ctx.beginPath(); ctx.ellipse(8, -4.5, 2.6, 1.8, -0.2, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = '#2a0f18';
     ctx.beginPath(); ctx.arc(8.7, -4.5, 1.1, 0, Math.PI * 2); ctx.fill();
-    // kumis
-    ctx.strokeStyle = 'rgba(255,214,130,0.95)';
-    ctx.lineWidth = 1.2;
-    const w1 = Math.sin(t * 4) * 6, w2 = Math.cos(t * 3.4) * 6;
-    ctx.beginPath(); ctx.moveTo(20, -1); ctx.bezierCurveTo(12, 10, -6, 4 + w1, -28, 14 + w1); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(19, 2); ctx.bezierCurveTo(10, 16, -4, 12 + w2, -22, 24 + w2); ctx.stroke();
+    // Kumis naga luwes meliuk seperti kaligrafi tinta
+    ctx.strokeStyle = 'rgba(255,225,130,0.95)';
+    ctx.lineWidth = 1.8;
+    const w1 = Math.sin(t * 4.2) * 9, w2 = Math.cos(t * 3.6) * 9;
+    ctx.beginPath(); ctx.moveTo(22, -1); ctx.bezierCurveTo(8, 14, -18, 6 + w1, -50, 20 + w1); ctx.stroke();
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(21, 2); ctx.bezierCurveTo(6, 20, -14, 16 + w2, -44, 32 + w2); ctx.stroke();
     ctx.restore();
   }
 
@@ -1256,25 +1837,47 @@ export class Game {
     ctx.fillText(`◯ ${this.ringCount}`, W - 22, 54);
     ctx.shadowBlur = 0;
 
-    if (this.combo >= 2) {
+    if (this.combo >= 2 && this.flowTimer > 0) {
       ctx.textAlign = 'center';
       ctx.font = '700 italic 30px "Cormorant Garamond", serif';
-      ctx.fillStyle = `rgba(255,224,150,${0.75 + Math.sin(this.time * 6) * 0.2})`;
-      ctx.fillText(`×${this.combo}`, W / 2, 24);
+      ctx.fillStyle = `rgba(255,224,150,${0.85 + Math.sin(this.time * 6) * 0.15})`;
+      ctx.fillText(`ALIRAN ×${this.combo}`, W / 2, 22);
+
+      // Grace timer bar
+      const bwFlow = 74;
+      const prog = clamp(this.flowTimer / 3.2, 0, 1);
+      ctx.fillStyle = 'rgba(255,255,255,0.2)';
+      this.round(W / 2 - bwFlow / 2, 54, bwFlow, 3, 1.5);
+      ctx.fillStyle = 'rgba(255,225,120,0.95)';
+      this.round(W / 2 - bwFlow / 2, 54, bwFlow * prog, 3, 1.5);
+
+      ctx.font = '600 11px Quicksand, sans-serif';
+      ctx.fillStyle = 'rgba(255,245,210,0.85)';
+      ctx.fillText(`+${Math.floor(this.flowBank * this.combo)} poin`, W / 2, 62);
     }
 
-    // meter momentum / boost
+    // meter momentum / boost / speed indicator
     const bw = 170, bx = W / 2 - bw / 2, by = H - 46;
-    const m = clamp((this.spd - 280) / 540, 0, 1);
+    const m = clamp((this.spd - 300) / 1500, 0, 1);
+    const speedRatio = this.spd / 300;
+    const isMax = speedRatio >= 5.95;
     ctx.fillStyle = 'rgba(255,255,255,0.18)';
     this.round(bx, by, bw, 5, 2.5);
-    const col = this.boost > 0 || this.spd > 600 ? 'rgba(255,226,140,1)' : 'rgba(255,250,240,0.9)';
+    const col = isMax
+      ? 'rgba(255,215,90,1)'
+      : this.boost > 0 || this.spd > 1100
+        ? 'rgba(255,226,140,1)'
+        : 'rgba(255,250,240,0.9)';
     ctx.fillStyle = col;
     this.round(bx, by, Math.max(5, bw * m), 5, 2.5);
     ctx.textAlign = 'center';
     ctx.font = '600 10px Quicksand, sans-serif';
-    ctx.fillStyle = 'rgba(255,250,240,0.65)';
-    ctx.fillText(this.spd > 650 ? '✦ SANGAT CEPAT ✦' : this.boost > 0 ? '✦ DORONGAN ANGIN ✦' : 'KECEPATAN NAGA', W / 2, by + 12);
+    ctx.fillStyle = isMax ? 'rgba(255,225,120,0.95)' : 'rgba(255,250,240,0.75)';
+    ctx.fillText(
+      isMax ? '✦ KECEPATAN MAKSIMAL (6.0x) ✦' : `KECEPATAN ${speedRatio.toFixed(1)}x / 6.0x`,
+      W / 2,
+      by + 12
+    );
 
     if (this.playT < 6.5 && this.mode === 'playing') {
       const a = Math.min(1, this.playT, 6.5 - this.playT);
@@ -1289,7 +1892,7 @@ export class Game {
     ctx.restore();
   }
 
-  drawGuideReticle(pal: Palette) {
+  drawGuideReticle() {
     const ctx = this.ctx;
     const gx = this.dx + 125;
     const gy = this.targetY;

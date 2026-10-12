@@ -49,8 +49,8 @@ export default function App() {
     if (!containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
     if (!rect.height) return;
-    const relY = ((clientY - rect.top) / rect.height) * 800;
-    gameRef.current?.setTargetY(relY);
+    const relRatio = (clientY - rect.top) / rect.height;
+    gameRef.current?.setPointerRatio(relRatio);
   }, []);
 
   // Track pointer movements on window for buttery smooth responsiveness
@@ -135,11 +135,12 @@ export default function App() {
             </div>
 
             <div className="anim-fadeup flex w-full flex-col items-center gap-5" style={{ animationDelay: '.2s' }}>
-              <div className="w-full max-w-[290px] space-y-2.5 rounded-2xl bg-white/10 p-4 text-left text-[13px] leading-snug text-white/90 backdrop-blur-md">
-                <div className="flex gap-3"><span className="w-5 text-center">↕</span><span><b>Gerakkan Mouse / Sentuh</b> ke atas & bawah untuk naik-turun</span></div>
-                <div className="flex gap-3"><span className="w-5 text-center text-amber-200">◯</span><span>Lewati <b className="text-amber-200">cincin emas</b> untuk dorongan & kombo</span></div>
-                <div className="flex gap-3"><span className="w-5 text-center">⛰</span><span>Hindari menabrak tebing karang & pulau terbang</span></div>
-                <div className="flex gap-3"><span className="w-5 text-center">✦</span><span>Terbang rendah dekat tanah untuk <b>Selancar Angin</b></span></div>
+              <div className="w-full max-w-[290px] space-y-2 rounded-2xl bg-white/10 p-4 text-left text-[12.5px] leading-snug text-white/90 backdrop-blur-md">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-amber-200">✦ ALIRAN ANGIN (SPEED FLOW)</div>
+                <div className="flex gap-2.5"><span className="w-4 text-center text-amber-200">◯</span><span>Lewati <b>cincin emas</b> untuk mulai Aliran & dorongan</span></div>
+                <div className="flex gap-2.5"><span className="w-4 text-center text-amber-200">✦</span><span>Terbang rendah untuk <b>Selancar Angin</b> & rawat kombo</span></div>
+                <div className="flex gap-2.5"><span className="w-4 text-center text-amber-200">⛰</span><span><b>Terelak tebing</b> nyaris senggol untuk bonus Aliran</span></div>
+                <div className="flex gap-2.5"><span className="w-4 text-center text-amber-200">⚡</span><span>Rantai Aliran tanpa henti untuk melesat hingga <b>6.0×</b></span></div>
               </div>
               <button
                 onClick={start}
@@ -154,17 +155,18 @@ export default function App() {
 
         {screen === 'over' && stats && (
           <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/20 px-8 text-center text-white backdrop-blur-[2px]">
-            <div className="anim-fadeup w-full max-w-[300px]">
+            <div className="anim-fadeup w-full max-w-[320px]">
               <div className="text-xs font-semibold tracking-[0.4em] text-white/70">PERJALANAN BERAKHIR</div>
               <h2 className="font-title mt-2 text-4xl font-bold">Sang Naga Beristirahat</h2>
               <div className="mt-8 text-6xl font-bold">{stats.score}</div>
               <div className="mt-1 text-xs font-semibold tracking-widest text-white/70">
                 {newBest ? <span className="anim-breathe text-amber-200">✦ REKOR BARU ✦</span> : `REKOR · ${best}`}
               </div>
-              <div className="mt-8 grid grid-cols-3 gap-2 rounded-2xl bg-white/10 p-4 backdrop-blur-md">
+              <div className="mt-8 grid grid-cols-4 gap-1.5 rounded-2xl bg-white/10 p-3.5 backdrop-blur-md">
                 <Stat label="Jarak" value={`${stats.distance}m`} />
                 <Stat label="Cincin" value={stats.rings} />
-                <Stat label="Kombo" value={`×${stats.bestCombo}`} />
+                <Stat label="Aliran" value={`×${stats.bestCombo}`} />
+                <Stat label="Puncak" value={stats.maxSpeed} />
               </div>
               <button
                 onClick={start}
