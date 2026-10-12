@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  background: #0b0a18;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  font-family: 'Quicksand', system-ui, sans-serif;
+}
+
+.font-title { font-family: 'Cormorant Garamond', serif; }
+
+@keyframes floaty {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes breathe {
+  0%, 100% { opacity: .55; }
+  50% { opacity: 1; }
+}
+.anim-floaty { animation: floaty 4s ease-in-out infinite; }
+.anim-fadeup { animation: fadeUp .8s ease-out both; }
+.anim-breathe { animation: breathe 2.4s ease-in-out infinite; }
