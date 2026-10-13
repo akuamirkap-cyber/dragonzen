@@ -1,4 +1,5 @@
 import { ZenAudio } from './audio';
+import { groundY, groundLowest, groundSlope, ridge, TERRAIN_BASE } from './terrain';
 
 export const W = 450;
 export const H = 800;
@@ -35,17 +36,6 @@ const hash = (n: number) => {
   const s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
   return s - Math.floor(s);
 };
-
-export function groundY(x: number) {
-  return 708 + 24 * Math.sin(x * 0.0042) + 15 * Math.sin(x * 0.0113 + 1.3) + 7 * Math.sin(x * 0.029 + 0.5);
-}
-
-function ridge(x: number, seed: number) {
-  const a = 1 - Math.abs(Math.sin(x * 0.0021 + seed));
-  const b = 1 - Math.abs(Math.sin(x * 0.0057 + seed * 2.1));
-  const c = Math.sin(x * 0.017 + seed * 3.7);
-  return a * a * 0.62 + b * b * 0.3 + c * 0.04 + 0.04;
-}
 
 function pointInTri(p: Vec, a: Vec, b: Vec, c: Vec) {
   const d1 = (p.x - b.x) * (a.y - b.y) - (a.x - b.x) * (p.y - b.y);
@@ -111,6 +101,7 @@ export class Game {
   playT = 0;
   bumpCd = 0;
   zoom = 0.62;
+  terrainBuf: Float32Array = new Float32Array(0);
   stars: { x: number; y: number; s: number; p: number }[] = [];
   clouds: { x: number; y: number; w: number; h: number }[] = [];
   balloons: { x: number; y: number; r: number; color1: string; color2: string; spd: number; bob: number }[] = [];
@@ -244,8 +235,14 @@ export class Game {
   }
 
   // ---------------- SPAWNING ----------------
-  makeRock(dir: number, x: number, len: number, w: number): Rock {
-    const base = dir < 0 ? groundY(x) + 34 : -24;
+  /** Alas menara batu yang tumbuh dari tanah: titik TERENDAH pada tapaknya, supaya
+   *  lereng yang miring tidak membuat batunya tampak melayang atau menganga. */
+  groundBase(x: number, w: number): number {
+    return groundLowest(x - w * 0.6, x + w * 0.6) + 34;
+  }
+
+  makeRock(dir: number, x: number, len: number, w: number, base?: number): Rock {
+    const b = base ?? (dir < 0 ? this.groundBase(x, w) : -24);
     const L = len + (dir < 0 ? 34 : 24);
     const tip = rand(-w * 0.12, w * 0.12);
     const left: Vec[] = [], right: Vec[] = [];
@@ -257,7 +254,7 @@ export class Game {
       left.push({ x: -w / 2 * shape + tip * t + j, y: dir * L * t });
       right.push({ x: w / 2 * shape + tip * t + rand(-4, 4) * (i > 0 && i < n ? 1 - t : 0), y: dir * L * t });
     }
-    return { dir, x, base, w, len: L, tip, left, right, tree: dir < 0 && Math.random() < 0.55 };
+    return { dir, x, base: b, w, len: L, tip, left, right, tree: dir < 0 && Math.random() < 0.55 };
   }
 
   makeIsland(x: number, y: number, r: number): Island {
@@ -273,24 +270,26 @@ export class Game {
   }
 
   addRing(x: number, y: number) {
-    const g = groundY(x);
-    this.rings.push({ x, y: clamp(y, 70, g - 70), r: 36, state: 0, t: 0 });
+    // Tanah terendah pada bentang cincin: dengan lereng yang miring, memakai satu titik
+    // saja bisa membuat cincin terbenam ke dalam bukit beberapa puluh piksel kemudian.
+    const g = groundLowest(x - 46, x + 46);
+    this.rings.push({ x, y: clamp(y, 70, g - 76), r: 36, state: 0, t: 0 });
   }
 
   spawnPattern(x: number) {
     const d = this.difficulty();
-    const g = groundY(x);
     const roll = Math.random();
     let width = 120;
     if (roll < 0.28) {
       // gerbang batu
       const gap = lerp(330, 230, d);
-      const c = rand(200, g - 210);
       const w = rand(64, 92);
+      const b = this.groundBase(x, w);
+      const c = rand(200, Math.max(240, b - 210));
       const top = c - gap / 2;
-      const bot = g - (c + gap / 2);
+      const bot = b - (c + gap / 2);
       if (top > 30) this.rocks.push(this.makeRock(1, x, top, w));
-      if (bot > 30) this.rocks.push(this.makeRock(-1, x, bot, w));
+      if (bot > 30) this.rocks.push(this.makeRock(-1, x, bot, w, b));
       this.addRing(x, c);
       if (Math.random() < 0.5) { this.addRing(x - 90, c + rand(-40, 40)); }
       width = 100;
@@ -308,13 +307,13 @@ export class Game {
         const sx = x + 160;
         const h = dive ? rand(60, 120) : rand(80, 150);
         if (dive) this.rocks.push(this.makeRock(1, sx, h, 70));
-        else this.rocks.push(this.makeRock(-1, sx, h, 70));
+        else this.rocks.push(this.makeRock(-1, sx, h, 70, this.groundBase(sx, 70)));
       }
       width = 4 * 80;
     } else if (roll < 0.7) {
       // pulau melayang
       const r = rand(36, 56);
-      const iy = rand(240, g - 260);
+      const iy = rand(240, groundLowest(x - r * 1.2, x + r * 1.2) - 260);
       this.islands.push(this.makeIsland(x, iy, r));
       const above = iy > 330 ? Math.random() < 0.7 : Math.random() < 0.3;
       const ry = above ? iy - r - 80 : iy + r * 1.6 + 70;
@@ -326,9 +325,11 @@ export class Game {
       // hutan menara batu
       const h1 = rand(140, lerp(280, 380, d));
       const h2 = rand(120, lerp(260, 360, d));
-      this.rocks.push(this.makeRock(-1, x, h1, rand(60, 85)));
-      this.rocks.push(this.makeRock(-1, x + 150, h2, rand(60, 85)));
-      const top = Math.min(g - h1, groundY(x + 150) - h2);
+      const w1 = rand(60, 85), w2 = rand(60, 85);
+      const b1 = this.groundBase(x, w1), b2 = this.groundBase(x + 150, w2);
+      this.rocks.push(this.makeRock(-1, x, h1, w1, b1));
+      this.rocks.push(this.makeRock(-1, x + 150, h2, w2, b2));
+      const top = Math.min(b1 - h1, b2 - h2);
       this.addRing(x + 75, top - 50);
       if (Math.random() < 0.5) this.addRing(x + 75, top - 50 - 90);
       width = 150;
@@ -892,19 +893,19 @@ export class Game {
     ctx.translate(sx, sy);
 
     // Pegunungan jauh dengan siluet pagoda kuno di cakrawala
-    this.layer(0.06, 470, 200, 0.3, pal.far, pal.fog, 0.45, false, true, sunA);
+    this.layer(0.06, 455, 210, 0.3, pal.far, pal.fog, 0.45, false, true, sunA);
 
     // Balon udara panas berukuran besar melayang perlahan di cakrawala (Alto's Odyssey hot air balloons)
     this.drawBalloons(pal, sunA);
 
     // Pegunungan tengah dengan puing kuil/pagoda kuno di puncak bukit batu yang diterpa cahaya matahari
-    this.layer(0.16, 560, 170, 1.7, pal.mid, pal.fog, 0.4, false, true, sunA);
+    this.layer(0.16, 535, 180, 1.7, pal.mid, pal.fog, 0.4, false, true, sunA);
 
     // Sekawanan burung bangau putih terbang di cakrawala (distant cranes)
     this.drawBirds(pal, false);
 
     // Pegunungan dekat dengan pepohonan pinus
-    this.layer(0.38, 640, 120, 4.2, pal.near, pal.fog, 0.3, true, false, sunA);
+    this.layer(0.38, 620, 135, 4.2, pal.near, pal.fog, 0.3, true, false, sunA);
 
     // Kabut lembut yang bergulung di lembah bawah (rolling valley fog)
     this.drawValleyFog(pal);
@@ -1320,10 +1321,15 @@ export class Game {
       { yBase: 680, amp: 40, speed: 36, alpha: 0.38, waveFreq: 0.0022 },
     ];
 
+    // Kabut ikut mengalir mengikuti ketinggian lereng di layar: saat naga meluncur
+    // menuruni lereng, lapisan kabut pun turun perlahan bersamanya.
+    const follow = (groundY(this.camX + W * 0.5) - TERRAIN_BASE) * 0.45;
+
     for (let i = 0; i < fogLayers.length; i++) {
       const fl = fogLayers[i];
       const off = this.camX * (0.12 + i * 0.08) + t * fl.speed;
-      const g = ctx.createLinearGradient(0, fl.yBase - fl.amp, 0, fl.yBase + 120);
+      const yBase = fl.yBase + follow;
+      const g = ctx.createLinearGradient(0, yBase - fl.amp, 0, yBase + 120);
       g.addColorStop(0, rgba(pal.fog, 0));
       g.addColorStop(0.35, rgba(pal.fog, fl.alpha));
       g.addColorStop(1, rgba(pal.fog, fl.alpha * 0.75));
@@ -1334,7 +1340,7 @@ export class Game {
       for (let x = -350; x <= W + 350; x += 12) {
         const wave = Math.sin((x + off) * fl.waveFreq) * fl.amp
           + Math.sin((x + off) * fl.waveFreq * 2.3 + 1.2) * (fl.amp * 0.35);
-        ctx.lineTo(x, fl.yBase + wave);
+        ctx.lineTo(x, yBase + wave);
       }
       ctx.lineTo(W + 350, H + 400);
       ctx.closePath();
@@ -1345,35 +1351,76 @@ export class Game {
   drawGround(pal: Palette) {
     const ctx = this.ctx;
     const x0 = this.camX - 350, x1 = this.camX + W + 500;
-    const g = ctx.createLinearGradient(0, 660, 0, H + 400);
+    // Sampel ketinggian lereng sekali saja per frame, lalu dipakai ulang oleh isian
+    // tanah, strata, tepi lereng, dan rumput — jauh lebih hemat daripada memanggil
+    // groundY() berulang kali untuk kontur yang sama.
+    const step = 4;
+    const n = Math.ceil((x1 - x0) / step) + 1;
+    if (this.terrainBuf.length < n) this.terrainBuf = new Float32Array(n + 64);
+    const ys = this.terrainBuf;
+    for (let i = 0; i < n; i++) ys[i] = groundY(x0 + i * step);
+    const yAt = (x: number) => ys[clamp(Math.round((x - x0) / step), 0, n - 1)];
+
+    // Gradasi tanah mengikuti ketinggian lereng di tengah layar, bukan dipatok ke satu
+    // garis tetap: jadi lapisan warna tanah ikut "turun" bersama lerengnya.
+    const gCenter = yAt(this.camX + W * 0.5);
+    const g = ctx.createLinearGradient(0, gCenter - 40, 0, gCenter + 330);
     g.addColorStop(0, rgba(pal.groundTop));
     g.addColorStop(1, rgba(pal.ground));
     ctx.fillStyle = g;
     ctx.beginPath();
     ctx.moveTo(x0, H + 400);
-    for (let x = x0; x <= x1; x += 8) ctx.lineTo(x, groundY(x));
+    for (let i = 0; i < n; i++) ctx.lineTo(x0 + i * step, ys[i]);
     ctx.lineTo(x1, H + 400);
     ctx.closePath();
     ctx.fill();
-    ctx.strokeStyle = rgba(mix(pal.groundTop, pal.fog, 0.45), 0.5);
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    for (let x = x0; x <= x1; x += 8) {
-      if (x === x0) ctx.moveTo(x, groundY(x)); else ctx.lineTo(x, groundY(x));
-    }
-    ctx.stroke();
-    // rumput kecil
-    ctx.fillStyle = rgba(mix(pal.groundTop, [0, 0, 0], 0.2));
-    const step = 22;
-    for (let wx = Math.floor(x0 / step) * step; wx < x1; wx += step) {
-      const h = hash(wx * 0.13);
-      if (h < 0.55) continue;
-      const y = groundY(wx);
-      const th = 6 + h * 10;
+
+    // Strata (tingkat lapisan lereng) yang mengikuti kontur permukaan — inilah yang
+    // membuat bukit-bukit terbaca "miring menurun" dan bukan garis datar yang lurus.
+    for (let k = 0; k < 4; k++) {
+      const depth = 34 + k * 52;
+      ctx.strokeStyle = rgba(mix(pal.groundTop, pal.ground, 0.3 + k * 0.2), 0.3 - k * 0.055);
+      ctx.lineWidth = 1.6;
       ctx.beginPath();
-      ctx.moveTo(wx - 3, y + 2);
+      for (let i = 0; i < n; i += 3) ctx.lineTo(x0 + i * step, ys[i] + depth);
+      ctx.stroke();
+    }
+
+    // Tepi lereng: makin menurun (menghadap matahari), makin terang cahaya tepinya,
+    // dan sisi tanjakan diberi bayangan tipis supaya bentuk lerengnya jelas terbaca.
+    const litBase = mix(pal.groundTop, pal.fog, 0.55);
+    const shade = mix(pal.groundTop, [0, 0, 0], 0.15);
+    const rstep = 12;
+    for (let wx = Math.floor(x0 / rstep) * rstep; wx <= x1; wx += rstep) {
+      const s = (yAt(wx + 20) - yAt(wx - 20)) / 40;
+      const lit = clamp(0.5 - s * 2.4, 0, 1);
+      ctx.strokeStyle = rgba(litBase, 0.16 + lit * 0.5);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(wx, yAt(wx) + 0.8);
+      ctx.lineTo(wx + rstep, yAt(wx + rstep) + 0.8);
+      ctx.stroke();
+      if (lit < 0.28) {
+        ctx.strokeStyle = rgba(shade, (0.28 - lit) * 0.7);
+        ctx.beginPath();
+        ctx.moveTo(wx, yAt(wx) + 3.4);
+        ctx.lineTo(wx + rstep, yAt(wx + rstep) + 3.4);
+        ctx.stroke();
+      }
+    }
+
+    // rumput / rumpun kecil: jarang & pendek, supaya siluet lerengnya tetap bersih
+    ctx.fillStyle = rgba(mix(pal.groundTop, [0, 0, 0], 0.2), 0.75);
+    const gstep = 30;
+    for (let wx = Math.floor(x0 / gstep) * gstep; wx < x1; wx += gstep) {
+      const h = hash(wx * 0.13);
+      if (h < 0.78) continue;
+      const y = yAt(wx);
+      const th = 4 + h * 6;
+      ctx.beginPath();
+      ctx.moveTo(wx - 2.4, y + 2);
       ctx.lineTo(wx, y - th);
-      ctx.lineTo(wx + 3, y + 2);
+      ctx.lineTo(wx + 2.4, y + 2);
       ctx.fill();
     }
   }
@@ -1402,6 +1449,15 @@ export class Game {
     }
     ctx.closePath();
     ctx.fill();
+    // tapak batu: elips yang dimiringkan mengikuti kemiringan lereng, jadi batu tampak
+    // benar-benar tumbuh dari lereng (bukan berdiri di garis datar).
+    if (rk.dir < 0) {
+      const s = groundSlope(rk.x, Math.max(20, rk.w * 0.6));
+      ctx.fillStyle = rgba(mix(dark, [0, 0, 0], 0.18), 0.9);
+      ctx.beginPath();
+      ctx.ellipse(0, 2, rk.w * 0.62, 6 + Math.min(6, Math.abs(s) * 22), Math.atan(s), 0, Math.PI * 2);
+      ctx.fill();
+    }
     // pohon pinus kecil di puncak
     if (rk.tree) {
       const tx = rk.tip, ty = rk.dir * rk.len;
