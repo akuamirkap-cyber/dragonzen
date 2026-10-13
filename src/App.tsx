@@ -13,6 +13,9 @@ export default function App() {
   const [best, setBest] = useState<number>(() => Number(localStorage.getItem('naga-angin-best') || 0));
   const [newBest, setNewBest] = useState(false);
   const [muted, setMuted] = useState(false);
+  // Kotak bingkai disimpan agar pointermove tidak perlu memaksa reflow layout
+  // setiap event (dulu getBoundingClientRect() dipanggil puluhan kali per detik).
+  const rectRef = useRef<DOMRect | null>(null);
 
   const go = (s: Screen) => {
     screenRef.current = s;
@@ -46,11 +49,32 @@ export default function App() {
 
   // Update target dragon vertical position from pointer (mouse / touch)
   const updatePointerY = useCallback((clientY: number) => {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    if (!rect.height) return;
+    let rect = rectRef.current;
+    if (!rect && containerRef.current) {
+      rect = containerRef.current.getBoundingClientRect();
+      rectRef.current = rect;
+    }
+    if (!rect || !rect.height) return;
     const relRatio = (clientY - rect.top) / rect.height;
     gameRef.current?.setPointerRatio(relRatio);
+  }, []);
+
+  // Ukuran bingkai hanya berubah saat jendela berubah ukuran / digulir - ukur ulang
+  // hanya pada saat-saat itu, bukan pada setiap gerakan pointer.
+  useEffect(() => {
+    const measure = () => {
+      rectRef.current = containerRef.current?.getBoundingClientRect() ?? null;
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true);
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
+    if (ro && containerRef.current) ro.observe(containerRef.current);
+    return () => {
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', measure, true);
+      ro?.disconnect();
+    };
   }, []);
 
   // Track pointer movements on window for buttery smooth responsiveness
@@ -83,6 +107,7 @@ export default function App() {
   }, [start]);
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    rectRef.current = containerRef.current?.getBoundingClientRect() ?? null;
     updatePointerY(e.clientY);
   };
 
@@ -112,7 +137,7 @@ export default function App() {
         <button
           onPointerDown={(e) => e.stopPropagation()}
           onClick={toggleMute}
-          className="absolute bottom-4 right-4 z-20 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white/80 backdrop-blur-sm transition hover:bg-white/20 cursor-pointer"
+          className="absolute bottom-4 right-4 z-20 flex h-10 w-10 items-center justify-center rounded-full bg-black/25 text-white/80 transition hover:bg-black/40 cursor-pointer"
           aria-label="Suara"
         >
           {muted ? (

@@ -23,6 +23,19 @@ const ZOOM_FAST = 0.52;
 const VIEW_Z_RATIO = 0.196;
 
 /**
+ * Seberapa jauh naga berada di belakang tepi kiri pandangan, sebagai pecahan lebar
+ * layar. 0,17 menempatkan naga di +-22% lebar layar - cukup mundur sehingga pemain
+ * bisa membaca lereng dan rintangan jauh di depannya, tanpa terasa terpisah dari dunia.
+ */
+const CAM_BACK = 0.17;
+
+/** Jumlah tingkat kecerahan untuk tepi lereng yang digambar berkelompok. */
+const LIT_LEVELS = 5;
+
+/** Anggaran piksel kanvas (lebar x tinggi kanvas, setelah skala perangkat). */
+const MAX_CANVAS_PIXELS = 2_600_000;
+
+/**
  * Langit-langit dunia tempat stalaktit bergantung. Ditaruh jauh di atas pandangan
  * (kamera lanskap bisa memperlihatkan sampai y ≈ -130) supaya alas batunya selalu
  * berada di luar layar — batu gantung tetap terbaca "tumbuh dari langit", bukan
@@ -132,6 +145,8 @@ export class Game {
   bumpCd = 0;
   zoom = ZOOM_BASE;
   terrainBuf: Float32Array = new Float32Array(0);
+  viewW = 0; viewH = 0;
+  litBuckets: number[][] = Array.from({ length: LIT_LEVELS }, () => [] as number[]);
   // Batas gambar ekstra akibat transform zoom (diisi ulang setiap frame di render()).
   padL = 0; padR = 0; padT = 0; padB = 0;
   stars: { x: number; y: number; s: number; p: number }[] = [];
@@ -193,7 +208,17 @@ export class Game {
     const parent = this.canvas.parentElement;
     if (!parent) return;
     const rect = parent.getBoundingClientRect();
-    this.dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    if (!rect.width || !rect.height) return;
+    if (rect.width === this.viewW && rect.height === this.viewH) return; // ukuran tak berubah
+    this.viewW = rect.width;
+    this.viewH = rect.height;
+    // Anggaran piksel: bingkai lanskap jauh lebih luas dari bingkai potret, jadi skala
+    // perangkat dibatasi (mis. 1280x720 @2x = 3,7 juta piksel yang harus diisi ulang
+    // 60x/detik). Dibatasi +-2,6 juta piksel supaya tetap mulus namun tetap tajam;
+    // di jendela yang sangat besar (mis. 4K penuh) skalanya boleh turun di bawah 1,
+    // sehingga kanvas tetap ringan dan peramban yang memperbesarnya kembali.
+    const budget = Math.sqrt(MAX_CANVAS_PIXELS / (rect.width * rect.height));
+    this.dpr = Math.max(0.6, Math.min(window.devicePixelRatio || 1, 2, budget));
     this.canvas.width = Math.round(rect.width * this.dpr);
     this.canvas.height = Math.round(rect.height * this.dpr);
     this.scale = rect.width / W;
@@ -436,9 +461,10 @@ export class Game {
     const targetZoom = lerp(ZOOM_BASE, ZOOM_FAST, speedNorm);
     this.zoom = lerp(this.zoom, targetZoom, 1 - Math.exp(-2.5 * dt));
 
-    // Dynamic camera lead: reveals more terrain ahead at high flight speeds
+    // Naga ditempatkan cukup mundur (kiri) supaya medan di depannya banyak terlihat,
+    // lalu kamera makin maju saat melaju kencang agar waktu reaksi tetap sama.
     const lead = clamp((this.spd - 320) / 1680, 0, 0.24);
-    this.camX = this.dx - W * (0.28 - lead);
+    this.camX = this.dx - W * (CAM_BACK - lead);
     this.shake = Math.max(0, this.shake - dt * 30);
     this.bumpCd = Math.max(0, this.bumpCd - dt);
 
@@ -889,12 +915,18 @@ export class Game {
 
     // bintang
     if (pal.star > 0.01) {
-      for (const st of this.stars) {
-        const a = pal.star * (0.5 + 0.5 * Math.sin(this.time * 1.6 + st.p));
-        ctx.fillStyle = `rgba(255,255,255,${a * 0.9})`;
-        const span = W + this.padL + this.padR;
-        const x = ((st.x - this.camX * 0.01 + this.padL) % span + span) % span - this.padL;
-        ctx.fillRect(x, st.y, st.s, st.s);
+      // Alpha bintang dikelompokkan per tingkat supaya fillStyle hanya diganti beberapa
+      // kali per frame, bukan sekali per bintang.
+      const span = W + this.padL + this.padR;
+      const STAR_LEVELS = 4;
+      for (let k = 0; k < STAR_LEVELS; k++) {
+        ctx.fillStyle = `rgba(255,255,255,${pal.star * 0.9 * (1 - k / STAR_LEVELS)})`;
+        for (const st of this.stars) {
+          const a = 0.5 + 0.5 * Math.sin(this.time * 1.6 + st.p);
+          if (Math.min(STAR_LEVELS - 1, Math.floor(a * STAR_LEVELS)) !== k) continue;
+          const x = ((st.x - this.camX * 0.01 + this.padL) % span + span) % span - this.padL;
+          ctx.fillRect(x, st.y, st.s, st.s);
+        }
       }
     }
 
@@ -1131,22 +1163,23 @@ export class Game {
     }
 
     if (trees) {
+      // Satu jalur untuk seluruh barisan pinus (warnanya sama) - jauh lebih hemat
+      // daripada satu fill() per pohon seperti sebelumnya.
       ctx.fillStyle = rgba(mix(col, [0, 0, 0], 0.15));
       const step = 26;
       const start = Math.floor((off - this.padL) / step) * step;
+      ctx.beginPath();
       for (let wx = start; wx < off + W + this.padR; wx += step) {
         const hsh = hash(wx * 0.37 + seed);
         if (hsh < 0.45) continue;
         const x = wx - off + (hash(wx) - 0.5) * 14;
         const y = base - ridge(x + off, seed) * amp + 2;
         const th = 14 + hsh * 22;
-        ctx.beginPath();
         ctx.moveTo(x, y - th);
         ctx.lineTo(x + th * 0.28, y);
         ctx.lineTo(x - th * 0.28, y);
-        ctx.closePath();
-        ctx.fill();
       }
+      ctx.fill();
     }
   }
 
@@ -1385,14 +1418,16 @@ export class Game {
       g.addColorStop(1, rgba(pal.fog, fl.alpha * 0.75));
       ctx.fillStyle = g;
 
+      // Isian dibatasi sampai ujung bawah gradien saja (di bawah itu warnanya sudah
+      // transparan penuh), jadi kita tidak mengisi ratusan ribu piksel tanpa efek.
       ctx.beginPath();
-      ctx.moveTo(-this.padL, H + this.padB);
-      for (let x = -this.padL; x <= W + this.padR; x += 12) {
+      ctx.moveTo(-this.padL, yBase + 130);
+      for (let x = -this.padL; x <= W + this.padR; x += 16) {
         const wave = Math.sin((x + off) * fl.waveFreq) * fl.amp
           + Math.sin((x + off) * fl.waveFreq * 2.3 + 1.2) * (fl.amp * 0.35);
         ctx.lineTo(x, yBase + wave);
       }
-      ctx.lineTo(W + this.padR, H + this.padB);
+      ctx.lineTo(W + this.padR, yBase + 130);
       ctx.closePath();
       ctx.fill();
     }
@@ -1438,41 +1473,56 @@ export class Game {
 
     // Tepi lereng: makin menurun (menghadap matahari), makin terang cahaya tepinya,
     // dan sisi tanjakan diberi bayangan tipis supaya bentuk lerengnya jelas terbaca.
+    //
+    // Kecerahan dikelompokkan ke dalam beberapa tingkat (LIT_LEVELS) lalu digambar
+    // sebagai satu jalur per tingkat. Sebelumnya setiap segmen 12 px memanggil stroke()
+    // sendiri - ratusan panggilan per frame - dan itu penyebab gerakan tersendat.
     const litBase = mix(pal.groundTop, pal.fog, 0.55);
     const shade = mix(pal.groundTop, [0, 0, 0], 0.15);
     const rstep = 12;
+    const buckets = this.litBuckets;
+    for (const b of buckets) b.length = 0;
     for (let wx = Math.floor(x0 / rstep) * rstep; wx <= x1; wx += rstep) {
-      const s = (yAt(wx + 20) - yAt(wx - 20)) / 40;
-      const lit = clamp(0.5 - s * 2.4, 0, 1);
-      ctx.strokeStyle = rgba(litBase, 0.16 + lit * 0.5);
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(wx, yAt(wx) + 0.8);
-      ctx.lineTo(wx + rstep, yAt(wx + rstep) + 0.8);
-      ctx.stroke();
-      if (lit < 0.28) {
-        ctx.strokeStyle = rgba(shade, (0.28 - lit) * 0.7);
-        ctx.beginPath();
-        ctx.moveTo(wx, yAt(wx) + 3.4);
-        ctx.lineTo(wx + rstep, yAt(wx + rstep) + 3.4);
-        ctx.stroke();
-      }
+      const sl = (yAt(wx + 20) - yAt(wx - 20)) / 40;
+      const lit = clamp(0.5 - sl * 2.4, 0, 1);
+      buckets[Math.min(LIT_LEVELS - 1, Math.floor(lit * LIT_LEVELS))].push(wx);
     }
+    ctx.lineWidth = 1.5;
+    for (let k = 0; k < LIT_LEVELS; k++) {
+      const list = buckets[k];
+      if (!list.length) continue;
+      ctx.strokeStyle = rgba(litBase, 0.16 + ((k + 0.5) / LIT_LEVELS) * 0.5);
+      ctx.beginPath();
+      for (const wx of list) {
+        ctx.moveTo(wx, yAt(wx) + 0.8);
+        ctx.lineTo(wx + rstep, yAt(wx + rstep) + 0.8);
+      }
+      ctx.stroke();
+    }
+    // bayangan tipis khusus sisi tanjakan
+    ctx.strokeStyle = rgba(shade, 0.16);
+    ctx.beginPath();
+    for (const wx of buckets[0]) {
+      ctx.moveTo(wx, yAt(wx) + 3.4);
+      ctx.lineTo(wx + rstep, yAt(wx + rstep) + 3.4);
+    }
+    ctx.stroke();
 
-    // rumput / rumpun kecil: jarang & pendek, supaya siluet lerengnya tetap bersih
+    // rumput / rumpun kecil: jarang & pendek, supaya siluet lerengnya tetap bersih.
+    // Semua rumpun digambar dalam SATU jalur (gaya warnanya sama) agar hemat.
     ctx.fillStyle = rgba(mix(pal.groundTop, [0, 0, 0], 0.2), 0.75);
     const gstep = 30;
+    ctx.beginPath();
     for (let wx = Math.floor(x0 / gstep) * gstep; wx < x1; wx += gstep) {
       const h = hash(wx * 0.13);
       if (h < 0.78) continue;
       const y = yAt(wx);
       const th = 4 + h * 6;
-      ctx.beginPath();
       ctx.moveTo(wx - 2.4, y + 2);
       ctx.lineTo(wx, y - th);
       ctx.lineTo(wx + 2.4, y + 2);
-      ctx.fill();
     }
+    ctx.fill();
   }
 
   drawRock(rk: Rock, pal: Palette) {
@@ -1704,56 +1754,6 @@ export class Game {
       const w = 11.2 * Math.pow(1 - u, 0.72) * (u < 0.08 ? 0.8 + u * 2.5 : 1);
       return Math.max(1.2, w);
     };
-
-    // Selendang Sutra Ekor Naga (Extended Calligraphy Silk Scarf trail like Alto's scarf)
-    // Dynamic length: bertambah panjang seiring peningkatan kecepatan dan kombo aliran
-    const scarfCount = Math.min(this.hist.length, 25 + Math.floor(clamp((this.spd - 300) / 28, 0, 55)) + Math.min(45, this.combo * 5));
-    if (scarfCount > 5) {
-      ctx.save();
-      const scarfPts: Vec[] = [];
-      const tailPt = pts[N - 1];
-      scarfPts.push(tailPt);
-      for (let k = 1; k < scarfCount; k++) {
-        const hp = this.hist[k];
-        if (!hp) break;
-        const wave = Math.sin(t * 7.5 - k * 0.35) * (k / scarfCount) * 7.5;
-        const prevHp = this.hist[Math.max(0, k - 1)];
-        let hdx = prevHp.x - hp.x, hdy = prevHp.y - hp.y;
-        const hl = Math.hypot(hdx, hdy) || 1;
-        hdx /= hl; hdy /= hl;
-        scarfPts.push({ x: hp.x - hdy * wave, y: hp.y + hdx * wave });
-      }
-
-      // Kilau luar selendang sutra kaligrafi
-      ctx.strokeStyle = 'rgba(255, 225, 140, 0.45)';
-      ctx.lineWidth = 14;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.beginPath();
-      scarfPts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
-      ctx.stroke();
-
-      // Pita sutra utama gradasi emas & merah vermilion
-      const headS = scarfPts[0], endS = scarfPts[scarfPts.length - 1];
-      const sGrad = ctx.createLinearGradient(headS.x, headS.y, endS.x, endS.y);
-      sGrad.addColorStop(0, 'rgba(255, 230, 160, 0.95)');
-      sGrad.addColorStop(0.3, 'rgba(226, 74, 58, 0.85)');
-      sGrad.addColorStop(0.7, 'rgba(156, 34, 52, 0.6)');
-      sGrad.addColorStop(1, 'rgba(255, 215, 120, 0)');
-      ctx.strokeStyle = sGrad;
-      ctx.lineWidth = 9;
-      ctx.beginPath();
-      scarfPts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
-      ctx.stroke();
-
-      // Benang emas bordir di tengah selendang
-      ctx.strokeStyle = 'rgba(255, 245, 205, 0.85)';
-      ctx.lineWidth = 2.2;
-      ctx.beginPath();
-      scarfPts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
-      ctx.stroke();
-      ctx.restore();
-    }
 
     // Luminous silk ribbon trail sepanjang tubuh naga
     ctx.save();
