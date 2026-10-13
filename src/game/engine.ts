@@ -29,6 +29,19 @@ const VIEW_Z_RATIO = 0.196;
  */
 const CAM_BACK = 0.17;
 
+/**
+ * Pelembutan perkiraan kecepatan kursor (1/detik). Kursor datang sebagai loncatan
+ * kecil per event, jadi kecepatannya perlu dihaluskan dulu supaya pengimbang majunya
+ * tidak menyuntik getaran.
+ */
+const FEED_SMOOTH = 18;
+
+/** Frekuensi dasar pegas kritikal-damping untuk gerak naik-turun naga (rad/detik). */
+const OMEGA_BASE = 30;
+
+/** Batas kecepatan vertikal naga (px/detik) - cukup untuk menanjak di kecepatan 6x. */
+const VY_MAX = 2400;
+
 /** Jumlah tingkat kecerahan untuk tepi lereng yang digambar berkelompok. */
 const LIT_LEVELS = 5;
 
@@ -122,6 +135,9 @@ export class Game {
   ro: ResizeObserver | null = null;
 
   dx = 0; dy = 320; ang = 0; spd = 280;
+  pointerRatio: number | null = null;
+  prevDestY = 0; feedV = 0; pitchVy = 0;
+  shakePh = 0;
   targetY = 320;
   vy = 0;
   punchScale = 1;
@@ -242,20 +258,50 @@ export class Game {
     if (this.audio.ctx) this.audio.ctx.close();
   }
 
+  /** Perkiraan kemiringan permukaan (dy/dx) di sekitar posisi naga. */
+  surfaceSlope(x: number): number {
+    const l = 40;
+    return (groundY(x + l) - groundY(x - l)) / (2 * l);
+  }
+
+  /** Ketinggian y minimum (batas tanah) yang boleh ditempuh naga pada posisi x. */
+  groundLimit(x = this.dx): number {
+    return groundY(x);
+  }
+
   /** Poros vertikal kamera (lihat VIEW_Z_RATIO). Dipakai bersama oleh render() dan
    *  pemetaan pointer, supaya posisi kursor selalu sejajar dengan sasaran naga. */
   viewZ() { return H * VIEW_Z_RATIO; }
 
   setHolding(h: boolean) { this.holding = h; }
+  /**
+   * Menyimpan posisi kursor di layar (0..1), bukan langsung mengubah sasaran.
+   * Sasaran baru dihitung setiap frame di updateDragon(), memakai zoom kamera saat itu.
+   * Dulu sasaran dihitung hanya saat event mouse tiba, sehingga ketika zoom kamera
+   * berubah sementara kursor diam, naga melenceng dari kursor lalu menyentak saat
+   * mouse akhirnya digerakkan.
+   */
   setPointerRatio(ratio: number) {
-    const zy = this.viewZ();
-    const screenY = ratio * H;
-    const worldY = zy + (screenY - zy) / Math.max(0.5, this.zoom);
-    const g = groundY(this.dx);
-    this.targetY = clamp(worldY, 35, g - 25);
+    this.pointerRatio = clamp(ratio, 0, 1);
   }
-  setTargetY(y: number) { this.setPointerRatio(y / H); }
-  adjustTargetY(delta: number) { this.targetY = clamp(this.targetY + delta, 35, groundY(this.dx) - 25); }
+  setTargetY(y: number) {
+    // y adalah piksel layar (0..H) - dipertahankan untuk pemanggil lama
+    this.pointerRatio = clamp(y / H, 0, 1);
+  }
+  adjustTargetY(delta: number) {
+    // delta dalam piksel dunia -> geser posisi kursor di ruang layar
+    if (this.pointerRatio === null) {
+      this.targetY = clamp(this.targetY + delta, 35, this.groundLimit() - 25);
+      return;
+    }
+    this.pointerRatio = clamp(this.pointerRatio + (delta * this.zoom) / H, 0, 1);
+  }
+
+  /** Posisi kursor (0..1) dalam ketinggian dunia, memakai zoom kamera saat ini. */
+  targetFromPointer(): number {
+    const zy = this.viewZ();
+    return zy + ((this.pointerRatio ?? 0.5) * H - zy) / this.zoom;
+  }
   setMuted(m: boolean) { this.audio.setMuted(m); }
 
   start() {
@@ -274,6 +320,7 @@ export class Game {
     this.flowTimer = 0; this.flowBank = 0; this.maxSpeedReached = 300;
     this.boost = 0; this.skimT = 0; this.deadT = 0; this.shake = 0; this.slowmo = 1; this.reported = false;
     this.playT = 0; this.holding = false;
+    this.prevDestY = this.dy; this.feedV = 0; this.pitchVy = 0; this.shakePh = 0;
   }
 
   difficulty() { return clamp((this.dx - this.startX) / 40000, 0, 1); }
@@ -465,7 +512,10 @@ export class Game {
     // lalu kamera makin maju saat melaju kencang agar waktu reaksi tetap sama.
     const lead = clamp((this.spd - 320) / 1680, 0, 0.24);
     this.camX = this.dx - W * (CAM_BACK - lead);
-    this.shake = Math.max(0, this.shake - dt * 30);
+    // guncangan meredup secara eksponensial dan berayun halus (bukan derau per frame)
+    this.shakePh += dt;
+    this.shake *= Math.exp(-7 * dt);
+    if (this.shake < 0.05) this.shake = 0;
     this.bumpCd = Math.max(0, this.bumpCd - dt);
 
     // Update birds across sky
@@ -519,22 +569,39 @@ export class Game {
     const prevX = this.dx;
     const prevY = this.dy;
 
+    // Sasaran dihitung ulang setiap frame dari posisi kursor (lihat setPointerRatio).
     let destY = this.targetY;
     if (this.mode === 'menu') {
       destY = 320 + Math.sin(this.time * 2.2) * 120;
+    } else if (this.pointerRatio !== null) {
+      destY = this.targetFromPointer();
     }
+    destY = clamp(destY, 35, this.groundLimit() - 20);
+    this.targetY = destY; // dipakai penggambar penanda sasaran
 
-    const gCurrent = groundY(this.dx);
-    destY = clamp(destY, 35, gCurrent - 20);
+    // Kecepatan kursor diperkirakan, lalu dipakai sebagai pengimbang maju (feedforward).
+    // Pegas biasa selalu tertinggal sejauh kecepatan/omega di belakang sasarannya, jadi
+    // saat mouse digerakkan cepat naga terasa "tidak mengikuti". Dengan membidik
+    // sasaran + kecepatan/omega, ketertinggalan itu hilang TANPA membuat pegasnya
+    // makin kaku (yang justru menambah getaran).
+    const destV = clamp((destY - this.prevDestY) / Math.max(1e-4, dt), -VY_MAX, VY_MAX);
+    this.prevDestY = destY;
+    const feed = lerp(this.feedV, destV, 1 - Math.exp(-FEED_SMOOTH * dt));
+    this.feedV = Math.abs(destV) < 1 ? feed * 0.9 : feed; // redam sisa saat kursor diam
 
-    // Responsive spring physics that stays nimble at higher speeds up to 6x
+    // Pegas kritikal-damping dengan solusi ANALITIK untuk selang dt.
+    // Dulu memakai Euler eksplisit, sehingga waktu frame yang naik-turun (frame drop
+    // di kecepatan tinggi) langsung terlihat sebagai gerakan naik-turun yang tersendat.
+    // Solusi analitik ini memberi hasil sama pada 30, 60, maupun 144 fps.
     const speedRatio = clamp(this.spd / 300, 1, 6.0);
-    const diff = destY - this.dy;
-    const springK = 62 * Math.min(1.85, Math.sqrt(speedRatio));
-    const damping = 15.5 * Math.min(1.4, Math.sqrt(speedRatio));
-    const accel = diff * springK - this.vy * damping;
-    this.vy += accel * dt;
-    this.dy += this.vy * dt;
+    const omega = OMEGA_BASE * Math.min(1.45, Math.sqrt(speedRatio));
+    const aim = destY + this.feedV / omega;
+    const off = aim - this.dy;
+    const ed = Math.exp(-omega * dt);
+    const imp = (this.vy + omega * off) * dt;
+    this.dy = aim - (off + imp) * ed;
+    this.vy = (this.vy - omega * imp) * ed;
+    this.vy = clamp(this.vy, -VY_MAX, VY_MAX);
 
     if (this.dy < 30) {
       this.dy = 30;
@@ -547,8 +614,12 @@ export class Game {
       this.audio.whoosh(clamp(Math.abs(this.vy) / 600, 0.4, 1));
     }
 
-    // Dynamic pitch orientation based on velocity & motion
-    const targetAng = clamp(Math.atan2(this.vy, this.spd), -0.75, 0.75);
+    // Dynamic pitch orientation based on velocity & motion.
+    // Kecepatan untuk sudut dihaluskan terpisah: gerakan posisi tetap ketat mengikuti
+    // kursor, tetapi hentakan kecepatan saat menyentuh lereng tidak membuat moncong
+    // naga berkedip naik-turun.
+    this.pitchVy = lerp(this.pitchVy, this.vy, 1 - Math.exp(-9 * dt));
+    const targetAng = clamp(Math.atan2(this.pitchVy, this.spd), -0.75, 0.75);
     this.ang += (targetAng - this.ang) * (1 - Math.exp(-12 * dt));
 
     const BASE_SPEED = 320;
@@ -629,15 +700,25 @@ export class Game {
       this.skimT = Math.max(0, this.skimT - dt * 1.5);
     }
 
-    // tanah
+    // ---- tanah / lereng ----
+    // Menyentuh permukaan diperlakukan seperti benda yang meluncur di lereng: kecepatan
+    // diproyeksikan ke arah permukaan (komponen tegak lurusnya dibuang), bukan dipangkas
+    // jadi nol. Dulu kecepatan naik dimatikan (vy = 0) setiap kali menyentuh lereng
+    // menanjak, sehingga pada kecepatan tinggi penjepitan ini bertarung dengan pegas
+    // SETIAP frame - lonjakan kecepatan sampai +-700 px/detik yang terasa sebagai
+    // gerakan tersendat saat menyusur tanah.
     const g2 = groundY(this.dx);
     if (this.dy > g2 - 12) {
+      const sl = this.surfaceSlope(this.dx);
+      const vx = Math.cos(this.ang) * this.spd;
+      const along = (vx + this.vy * sl) / (1 + sl * sl); // kecepatan searah lereng (dx/dt)
       this.dy = g2 - 12;
-      this.vy = Math.min(0, this.vy);
+      this.vy = clamp(along * sl, -VY_MAX, VY_MAX);
+      this.feedV = 0; // saat menempel lereng, konturnya yang menentukan gerak
       if (this.mode === 'playing' && this.bumpCd <= 0) {
         this.bumpCd = 0.4;
         this.audio.bump();
-        this.shake = 3;
+        this.shake = 3; this.shakePh = 0;
         for (let i = 0; i < 8; i++) {
           this.parts.push({ x: this.dx, y: g2 - 4, vx: rand(-140, 20), vy: rand(-100, -20), life: 0.6, max: 0.6, size: rand(1.5, 3), color: 'dust', kind: 1, ph: 0 });
         }
@@ -722,7 +803,12 @@ export class Game {
     // Smooth, potent boost energy impulse (+160 for perfect, +100 normal)
     this.boostEnergy = Math.min(350, this.boostEnergy + (perfect ? 160 : 100));
     this.boost = perfect ? 1.6 : 1.1;
-    this.punchScale = perfect ? 1.05 : 1.028;
+    // Efek "punch" memperbesar seluruh dunia sekitar poros kamera. Di kecepatan tinggi
+    // cincin terlewati 5-9 kali per detik, jadi tanpa peredaman ini dunia terus-menerus
+    // membesar-mengecil - terbaca sebagai gerakan yang tidak mulus. Dikecilkan sesuai
+    // kecepatan supaya sisa efeknya tetap terasa "berisi" tanpa menggetarkan layar.
+    const punchScaleDown = clamp(1 - (this.spd - 320) / 1500, 0.16, 1);
+    this.punchScale = 1 + ((perfect ? 0.05 : 0.028)) * punchScaleDown;
     const pts = 10 * this.combo + (perfect ? 20 : 0);
     this.ringScore += pts;
     this.audio.chime(Math.min(this.combo - 1, 9), perfect);
@@ -752,7 +838,7 @@ export class Game {
 
   graze(p: Vec, pushYDir: number) {
     this.bumpCd = 0.55;
-    this.shake = 3;
+    this.shake = 3; this.shakePh = 0;
     this.combo++;
     this.bestCombo = Math.max(this.bestCombo, this.combo);
     this.flowTimer = 3.2;
@@ -783,7 +869,7 @@ export class Game {
     if (this.mode !== 'playing') return;
     this.mode = 'dead';
     this.slowmo = 0.25;
-    this.shake = 16;
+    this.shake = 16; this.shakePh = 0;
     this.holding = false;
     this.audio.crash();
     for (let i = 0; i < this.body.length; i += 1) {
@@ -883,8 +969,8 @@ export class Game {
     ctx.setTransform(s, 0, 0, s, 0, 0);
 
     const { p: pal, i: pi, t: pt } = this.palette();
-    const sx = (Math.random() - 0.5) * this.shake;
-    const sy = (Math.random() - 0.5) * this.shake;
+    const sx = Math.sin(this.shakePh * 46) * this.shake;
+    const sy = Math.cos(this.shakePh * 39) * this.shake * 0.7;
 
     // Apply camera zoom transform to game world
     ctx.save();
