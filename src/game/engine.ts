@@ -1,8 +1,34 @@
 import { ZenAudio } from './audio';
 import { groundY, groundLowest, groundSlope, ridge, TERRAIN_BASE } from './terrain';
 
-export const W = 450;
-export const H = 800;
+// Bingkai lanskap 16:9 (1280 x 720). Semua tata letak diturunkan dari dua angka ini.
+export const W = 1280;
+export const H = 720;
+
+/**
+ * Zoom kamera (tinggi dunia yang terlihat = H / zoom).
+ * 0,72 -> terlihat ±1.000 px dunia secara vertikal: cukup untuk menampung seluruh
+ * rentang permainan (langit-langit naga sampai dasar lembah terjauh), sementara
+ * bukit-bukitnya tampil besar dan miringnya terasa.
+ * Saat melaju kencang kamera menarik diri (0,52) supaya tetap ada ruang reaksi.
+ */
+const ZOOM_BASE = 0.72;
+const ZOOM_FAST = 0.52;
+
+/**
+ * Poros vertikal kamera, sebagai pecahan dari tinggi layar. Sengaja di atas titik
+ * tengah: dengan begitu permukaan tanah rata-rata berada di ±75% tinggi layar
+ * (sepertiga bawah), langit luas di atas, dan seluruh rentang terbang tetap terlihat.
+ */
+const VIEW_Z_RATIO = 0.196;
+
+/**
+ * Langit-langit dunia tempat stalaktit bergantung. Ditaruh jauh di atas pandangan
+ * (kamera lanskap bisa memperlihatkan sampai y ≈ -130) supaya alas batunya selalu
+ * berada di luar layar — batu gantung tetap terbaca "tumbuh dari langit", bukan
+ * segitiga yang melayang di udara.
+ */
+const HANG_TOP = -260;
 
 type RGB = [number, number, number];
 interface Vec { x: number; y: number }
@@ -25,6 +51,10 @@ const PALETTES: Palette[] = [
 const SUN_Y = [560, 170, 480, 720];
 const SUN_A = [1, 1, 1, 0];
 const MOON_A = [0, 0, 0, 1];
+
+// Puncak bukit tertinggi di dunia (±60 px di atas TERRAIN_BASE): hiasan langit
+// (bintang, kelopak, kunang-kunang) dijaga tetap di atas garis ini.
+const SKY_FLOOR = TERRAIN_BASE - 130;
 
 const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -100,8 +130,10 @@ export class Game {
   autoDive = false;
   playT = 0;
   bumpCd = 0;
-  zoom = 0.62;
+  zoom = ZOOM_BASE;
   terrainBuf: Float32Array = new Float32Array(0);
+  // Batas gambar ekstra akibat transform zoom (diisi ulang setiap frame di render()).
+  padL = 0; padR = 0; padT = 0; padB = 0;
   stars: { x: number; y: number; s: number; p: number }[] = [];
   clouds: { x: number; y: number; w: number; h: number }[] = [];
   balloons: { x: number; y: number; r: number; color1: string; color2: string; spd: number; bob: number }[] = [];
@@ -113,8 +145,8 @@ export class Game {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d')!;
     this.cb = cb;
-    for (let i = 0; i < 120; i++) this.stars.push({ x: rand(-100, W + 100), y: rand(-150, 560), s: rand(0.3, 1.8), p: rand(0, 6.28) });
-    for (let i = 0; i < 9; i++) this.clouds.push({ x: rand(-150, W + 450), y: rand(40, 440), w: rand(110, 260), h: rand(12, 26) });
+    for (let i = 0; i < 210; i++) this.stars.push({ x: rand(-900, W + 900), y: rand(-80, SKY_FLOOR), s: rand(0.3, 1.8), p: rand(0, 6.28) });
+    for (let i = 0; i < 11; i++) this.clouds.push({ x: rand(-700, W + 700), y: rand(30, SKY_FLOOR - 60), w: rand(110, 260), h: rand(12, 26) });
     const balloonColors = [
       ['#df654a', '#fae1b8'],
       ['#3b6885', '#fae7aa'],
@@ -127,7 +159,7 @@ export class Game {
     for (let i = 0; i < 8; i++) {
       const bc = balloonColors[i % balloonColors.length];
       this.balloons.push({
-        x: i * 360 + rand(40, 260),
+        x: i * 420 + rand(30, 300),
         y: rand(80, 360),
         r: rand(24, 46),
         color1: bc[0],
@@ -140,7 +172,7 @@ export class Game {
     for (let i = 0; i < 14; i++) {
       const near = i < 5;
       this.birds.push({
-        x: rand(0, W + 700),
+        x: rand(-700, W + 900),
         y: near ? rand(100, 480) : rand(70, 320),
         vx: near ? rand(70, 115) : rand(45, 75),
         vy: rand(-4, 4),
@@ -185,9 +217,13 @@ export class Game {
     if (this.audio.ctx) this.audio.ctx.close();
   }
 
+  /** Poros vertikal kamera (lihat VIEW_Z_RATIO). Dipakai bersama oleh render() dan
+   *  pemetaan pointer, supaya posisi kursor selalu sejajar dengan sasaran naga. */
+  viewZ() { return H * VIEW_Z_RATIO; }
+
   setHolding(h: boolean) { this.holding = h; }
   setPointerRatio(ratio: number) {
-    const zy = H * 0.5;
+    const zy = this.viewZ();
     const screenY = ratio * H;
     const worldY = zy + (screenY - zy) / Math.max(0.5, this.zoom);
     const g = groundY(this.dx);
@@ -204,7 +240,7 @@ export class Game {
     this.parts = this.parts.filter((p) => p.kind === 2 || p.kind === 3);
     this.dy = 300; this.targetY = 300; this.vy = 0; this.punchScale = 1; this.whooshCd = 0; this.ang = 0.05; this.spd = 300;
     this.boostEnergy = 0;
-    this.zoom = 0.62;
+    this.zoom = ZOOM_BASE;
     this.hist = [];
     for (let i = 0; i < 80; i++) this.hist.push({ x: this.dx - i * 3, y: this.dy });
     this.startX = this.dx;
@@ -242,8 +278,10 @@ export class Game {
   }
 
   makeRock(dir: number, x: number, len: number, w: number, base?: number): Rock {
-    const b = base ?? (dir < 0 ? this.groundBase(x, w) : -24);
-    const L = len + (dir < 0 ? 34 : 24);
+    const b = base ?? (dir < 0 ? this.groundBase(x, w) : HANG_TOP);
+    // Untuk batu gantung, `len` adalah koordinat y ujungnya, jadi panjangnya dihitung
+    // dari langit-langit. Untuk menara dari tanah, `len` adalah tingginya.
+    const L = dir < 0 ? len + 34 : len - HANG_TOP;
     const tip = rand(-w * 0.12, w * 0.12);
     const left: Vec[] = [], right: Vec[] = [];
     const n = 6;
@@ -393,9 +431,9 @@ export class Game {
       }
     }
 
-    // Dynamic camera zoom: zoomed out wide (0.62), pulling back even further (0.45) at high speed
+    // Zoom dinamis: melonggarkan pandangan saat melaju kencang agar ruang reaksi tetap lega
     const speedNorm = clamp((this.spd - 320) / 1680, 0, 1);
-    const targetZoom = lerp(0.62, 0.45, speedNorm);
+    const targetZoom = lerp(ZOOM_BASE, ZOOM_FAST, speedNorm);
     this.zoom = lerp(this.zoom, targetZoom, 1 - Math.exp(-2.5 * dt));
 
     // Dynamic camera lead: reveals more terrain ahead at high flight speeds
@@ -766,17 +804,17 @@ export class Game {
     if (Math.random() < dt * 8) {
       if (night > 0.55 && Math.random() < 0.6) {
         // Kunang-kunang malam
-        this.parts.push({ x: this.camX + rand(0, W + 300), y: rand(80, 650), vx: rand(-15, 15), vy: rand(-15, 5), life: 6, max: 6, size: rand(1.2, 2.4), color: 'fly', kind: 2, ph: Math.random() * 6 });
+        this.parts.push({ x: this.camX + rand(0, W + 300), y: rand(80, SKY_FLOOR), vx: rand(-15, 15), vy: rand(-15, 5), life: 6, max: 6, size: rand(1.2, 2.4), color: 'fly', kind: 2, ph: Math.random() * 6 });
       } else {
         // Kelopak bunga sakura berguguran ditiup angin
-        this.parts.push({ x: this.camX + W + rand(20, 140), y: rand(-40, 580), vx: rand(-85, -35), vy: rand(18, 45), life: 10, max: 10, size: rand(2.2, 4.2), color: 'petal', kind: 3, ph: Math.random() * 6 });
+        this.parts.push({ x: this.camX + W + rand(20, 140), y: rand(-60, SKY_FLOOR), vx: rand(-85, -35), vy: rand(18, 45), life: 10, max: 10, size: rand(2.2, 4.2), color: 'petal', kind: 3, ph: Math.random() * 6 });
       }
     }
     // Debu gurun keemasan / stardust atmosferik yang terhempas angin
     if (Math.random() < dt * 9) {
       this.parts.push({
         x: this.camX + W + rand(10, 120),
-        y: rand(120, 680),
+        y: rand(110, SKY_FLOOR + 40),
         vx: rand(-110, -50),
         vy: rand(-10, 15),
         life: rand(4, 7),
@@ -792,7 +830,7 @@ export class Game {
     }
     // garis angin
     if (this.spd > 380 && Math.random() < dt * (this.spd - 380) / 30) {
-      this.parts.push({ x: this.camX + W + 20, y: rand(30, 700), vx: -this.spd * rand(1.2, 1.8), vy: 0, life: 0.8, max: 0.8, size: rand(30, 80), color: 'wind', kind: 6, ph: 0 });
+      this.parts.push({ x: this.camX + W + 20, y: rand(30, SKY_FLOOR + 70), vx: -this.spd * rand(1.2, 1.8), vy: 0, life: 0.8, max: 0.8, size: rand(30, 80), color: 'wind', kind: 6, ph: 0 });
     }
     for (const p of this.parts) {
       p.life -= dt;
@@ -825,26 +863,37 @@ export class Game {
     // Apply camera zoom transform to game world
     ctx.save();
     const zx = W * 0.35;
-    const zy = H * 0.5;
+    const zy = this.viewZ();
     ctx.translate(zx, zy);
     ctx.scale(this.zoom * this.punchScale, this.zoom * this.punchScale);
     ctx.translate(-zx, -zy);
 
+    // Karena transform zoom, tepi pandangan dunia melebar melewati batas layar (W/H).
+    // Semua lapisan latar harus digambar sampai sejauh itu, kalau tidak akan ada celah
+    // kosong di tepi bingkai lanskap yang lebar ini.
+    const inv = 1 / this.zoom;
+    this.padL = zx * (inv - 1) + 90;
+    this.padR = (W - zx) * (inv - 1) + 90;
+    this.padT = zy * (inv - 1) + 90;
+    this.padB = (H - zy) * (inv - 1) + 90;
+    const dw = -this.padL, dh = W + this.padL + this.padR;
+    const dv = -this.padT, dvh = H + this.padT + this.padB;
+
     // langit (full bleed with wide margins for zoom out)
-    const sky = ctx.createLinearGradient(0, -350, 0, H + 350);
+    const sky = ctx.createLinearGradient(0, dv, 0, H + this.padB);
     sky.addColorStop(0, rgba(pal.skyTop));
     sky.addColorStop(0.75, rgba(pal.skyBot));
     sky.addColorStop(1, rgba(pal.fog));
     ctx.fillStyle = sky;
-    ctx.fillRect(-350, -450, W + 700, H + 900);
+    ctx.fillRect(dw, dv, dh, dvh);
 
     // bintang
     if (pal.star > 0.01) {
       for (const st of this.stars) {
         const a = pal.star * (0.5 + 0.5 * Math.sin(this.time * 1.6 + st.p));
         ctx.fillStyle = `rgba(255,255,255,${a * 0.9})`;
-        const span = W + 450;
-        const x = ((st.x - this.camX * 0.01 + 225) % span + span) % span - 225;
+        const span = W + this.padL + this.padR;
+        const x = ((st.x - this.camX * 0.01 + this.padL) % span + span) % span - this.padL;
         ctx.fillRect(x, st.y, st.s, st.s);
       }
     }
@@ -860,7 +909,7 @@ export class Game {
       gl.addColorStop(0, rgba(pal.sun, 0.55 * sunA));
       gl.addColorStop(1, rgba(pal.sun, 0));
       ctx.fillStyle = gl;
-      ctx.fillRect(-350, -450, W + 700, H + 900);
+      ctx.fillRect(sunX - 270, sunY - 270, 540, 540);
       ctx.fillStyle = rgba(pal.sun, 0.95 * sunA);
       ctx.beginPath(); ctx.arc(sunX, sunY, 40, 0, Math.PI * 2); ctx.fill();
     }
@@ -870,7 +919,7 @@ export class Game {
       gl.addColorStop(0, `rgba(210,220,255,${0.35 * moonA})`);
       gl.addColorStop(1, 'rgba(210,220,255,0)');
       ctx.fillStyle = gl;
-      ctx.fillRect(-350, -450, W + 700, 650);
+      ctx.fillRect(mx - 190, my - 190, 380, 380);
       ctx.fillStyle = `rgba(240,244,255,${moonA})`;
       ctx.beginPath(); ctx.arc(mx, my, 26, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = rgba(pal.skyTop, moonA);
@@ -879,8 +928,8 @@ export class Game {
 
     // awan
     for (const c of this.clouds) {
-      const span = W + 700;
-      const x = ((c.x - this.camX * 0.08 + 350) % span + span) % span - 350;
+      const span = W + this.padL + this.padR;
+      const x = ((c.x - this.camX * 0.08 + this.padL) % span + span) % span - this.padL;
       ctx.fillStyle = rgba(mix(pal.fog, pal.skyBot, 0.3), 0.5);
       this.pill(x, c.y, c.w, c.h);
       this.pill(x + c.w * 0.2, c.y - c.h * 0.7, c.w * 0.5, c.h);
@@ -981,20 +1030,21 @@ export class Game {
     g.addColorStop(0, rgba(col));
     g.addColorStop(1, rgba(mix(col, fog, fogAmt)));
     ctx.fillStyle = g;
+    const xa = -this.padL, xb = W + this.padR;
     ctx.beginPath();
-    ctx.moveTo(-350, H + 400);
-    for (let x = -350; x <= W + 350; x += 6) {
+    ctx.moveTo(xa, H + this.padB);
+    for (let x = xa; x <= xb; x += 6) {
       ctx.lineTo(x, base - ridge(x + off, seed) * amp);
     }
-    ctx.lineTo(W + 350, H + 400);
+    ctx.lineTo(xb, H + this.padB);
     ctx.closePath();
     ctx.fill();
 
     // Puing kuil & pagoda kuno di puncak bukit batu yang diterpa cahaya matahari
     if (ruins) {
       const ruinStep = 440;
-      const rStart = Math.floor((off - 350) / ruinStep) * ruinStep;
-      for (let wx = rStart; wx < off + W + 350; wx += ruinStep) {
+      const rStart = Math.floor((off - this.padL) / ruinStep) * ruinStep;
+      for (let wx = rStart; wx < off + W + this.padR; wx += ruinStep) {
         const hsh = hash(wx * 0.73 + seed * 2.1);
         if (hsh < 0.32) continue;
         const x = wx - off;
@@ -1083,8 +1133,8 @@ export class Game {
     if (trees) {
       ctx.fillStyle = rgba(mix(col, [0, 0, 0], 0.15));
       const step = 26;
-      const start = Math.floor((off - 350) / step) * step;
-      for (let wx = start; wx < off + W + 350; wx += step) {
+      const start = Math.floor((off - this.padL) / step) * step;
+      for (let wx = start; wx < off + W + this.padR; wx += step) {
         const hsh = hash(wx * 0.37 + seed);
         if (hsh < 0.45) continue;
         const x = wx - off + (hash(wx) - 0.5) * 14;
@@ -1128,9 +1178,9 @@ export class Game {
 
   drawBalloons(pal: Palette, sunA: number) {
     const ctx = this.ctx;
-    const span = W + 700;
+    const span = W + this.padL + this.padR;
     for (const b of this.balloons) {
-      const bx = ((b.x - this.camX * b.spd + 350) % span + span) % span - 350;
+      const bx = ((b.x - this.camX * b.spd + this.padL) % span + span) % span - this.padL;
       const by = b.y + Math.sin(this.time * 0.7 + b.bob) * 14;
       const r = b.r;
       const atmosphericFade = 0.88;
@@ -1226,8 +1276,8 @@ export class Game {
     for (const b of this.birds) {
       if (b.near !== nearOnly) continue;
       const x = b.x - this.camX * (b.near ? 0.95 : 0.3);
-      const span = W + 700;
-      const sx = ((x + 350) % span + span) % span - 350;
+      const span = W + this.padL + this.padR;
+      const sx = ((x + this.padL) % span + span) % span - this.padL;
       const sy = b.y;
       const sz = b.size;
 
@@ -1336,13 +1386,13 @@ export class Game {
       ctx.fillStyle = g;
 
       ctx.beginPath();
-      ctx.moveTo(-350, H + 400);
-      for (let x = -350; x <= W + 350; x += 12) {
+      ctx.moveTo(-this.padL, H + this.padB);
+      for (let x = -this.padL; x <= W + this.padR; x += 12) {
         const wave = Math.sin((x + off) * fl.waveFreq) * fl.amp
           + Math.sin((x + off) * fl.waveFreq * 2.3 + 1.2) * (fl.amp * 0.35);
         ctx.lineTo(x, yBase + wave);
       }
-      ctx.lineTo(W + 350, H + 400);
+      ctx.lineTo(W + this.padR, H + this.padB);
       ctx.closePath();
       ctx.fill();
     }
@@ -1350,7 +1400,7 @@ export class Game {
 
   drawGround(pal: Palette) {
     const ctx = this.ctx;
-    const x0 = this.camX - 350, x1 = this.camX + W + 500;
+    const x0 = this.camX - this.padL, x1 = this.camX + W + this.padR;
     // Sampel ketinggian lereng sekali saja per frame, lalu dipakai ulang oleh isian
     // tanah, strata, tepi lereng, dan rumput — jauh lebih hemat daripada memanggil
     // groundY() berulang kali untuk kontur yang sama.
@@ -1364,14 +1414,14 @@ export class Game {
     // Gradasi tanah mengikuti ketinggian lereng di tengah layar, bukan dipatok ke satu
     // garis tetap: jadi lapisan warna tanah ikut "turun" bersama lerengnya.
     const gCenter = yAt(this.camX + W * 0.5);
-    const g = ctx.createLinearGradient(0, gCenter - 40, 0, gCenter + 330);
+    const g = ctx.createLinearGradient(0, gCenter - 40, 0, gCenter + 420);
     g.addColorStop(0, rgba(pal.groundTop));
     g.addColorStop(1, rgba(pal.ground));
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.moveTo(x0, H + 400);
+    ctx.moveTo(x0, H + this.padB);
     for (let i = 0; i < n; i++) ctx.lineTo(x0 + i * step, ys[i]);
-    ctx.lineTo(x1, H + 400);
+    ctx.lineTo(x1, H + this.padB);
     ctx.closePath();
     ctx.fill();
 
@@ -1939,11 +1989,11 @@ export class Game {
       const a = Math.min(1, this.playT, 6.5 - this.playT);
       ctx.font = '600 15px Quicksand, sans-serif';
       ctx.fillStyle = `rgba(255,250,240,${a * 0.92})`;
-      ctx.fillText('Gerakkan mouse ke atas & bawah', W / 2, H * 0.2);
-      ctx.fillText('untuk mengendalikan naga', W / 2, H * 0.2 + 22);
+      ctx.fillText('Gerakkan mouse ke atas & bawah', W / 2, H * 0.13);
+      ctx.fillText('untuk mengendalikan naga', W / 2, H * 0.13 + 22);
       ctx.font = '500 13px Quicksand, sans-serif';
       ctx.fillStyle = `rgba(255,226,150,${a * 0.92})`;
-      ctx.fillText('Lewati cincin emas untuk dorongan ✦', W / 2, H * 0.2 + 50);
+      ctx.fillText('Lewati cincin emas untuk dorongan ✦', W / 2, H * 0.13 + 50);
     }
     ctx.restore();
   }

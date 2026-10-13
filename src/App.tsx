@@ -97,10 +97,10 @@ export default function App() {
     <div className="fixed inset-0 flex items-center justify-center bg-[#0b0a18] select-none cursor-default">
       <div
         ref={containerRef}
-        className={`relative overflow-hidden shadow-2xl sm:rounded-[28px] ${screen === 'playing' ? 'cursor-none' : 'cursor-default'}`}
+        className={`[container-type:size] relative overflow-hidden shadow-2xl sm:rounded-[28px] ${screen === 'playing' ? 'cursor-none' : 'cursor-default'}`}
         style={{
-          width: 'min(100vw, calc(100dvh * 9 / 16))',
-          height: 'min(100dvh, calc(100vw * 16 / 9))',
+          width: 'min(100vw, calc(100dvh * 16 / 9))',
+          height: 'min(100dvh, calc(100vw * 9 / 16))',
           touchAction: 'none',
         }}
         onPointerDown={onPointerDown}
@@ -123,20 +123,20 @@ export default function App() {
         </button>
 
         {screen === 'menu' && (
-          <div className="absolute inset-0 z-10 flex flex-col items-center justify-between px-8 py-[10%] text-center text-white">
-            <div className="anim-fadeup mt-2">
-              <div className="mb-2 text-xs font-semibold tracking-[0.5em] text-white/70">龍 · ZEN · FLIGHT</div>
-              <h1 className="font-title anim-floaty text-6xl font-bold leading-none tracking-wide drop-shadow-[0_4px_20px_rgba(0,0,0,0.25)]">
-                Naga<br />Angin
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-[3cqh] px-[4cqw] text-center text-white">
+            <div className="anim-fadeup">
+              <div className="mb-1 text-[clamp(9px,1.7cqh,12px)] font-semibold tracking-[0.5em] text-white/70">龍 · ZEN · FLIGHT</div>
+              <h1 className="font-title anim-floaty text-[clamp(30px,9cqh,64px)] font-bold leading-none tracking-wide drop-shadow-[0_4px_20px_rgba(0,0,0,0.25)]">
+                Naga Angin
               </h1>
-              <p className="mx-auto mt-4 max-w-[270px] text-sm font-medium text-white/80">
+              <p className="mx-auto mt-2 max-w-[340px] text-[clamp(11px,2.2cqh,14px)] font-medium text-white/80">
                 Kendalikan naga ke atas dan bawah dengan gerakan mouse sesukamu.
               </p>
             </div>
 
-            <div className="anim-fadeup flex w-full flex-col items-center gap-5" style={{ animationDelay: '.2s' }}>
-              <div className="w-full max-w-[290px] space-y-2 rounded-2xl bg-white/10 p-4 text-left text-[12.5px] leading-snug text-white/90 backdrop-blur-md">
-                <div className="text-[11px] font-bold uppercase tracking-wider text-amber-200">✦ ALIRAN ANGIN (SPEED FLOW)</div>
+            <div className="anim-fadeup flex w-full flex-col items-center gap-[2.4cqh]" style={{ animationDelay: '.2s' }}>
+              <div className="w-full max-w-[430px] space-y-1.5 rounded-2xl bg-white/10 p-3.5 text-left text-[clamp(11px,2cqh,12.5px)] leading-snug text-white/90 backdrop-blur-md">
+                <div className="text-[clamp(9px,1.7cqh,11px)] font-bold uppercase tracking-wider text-amber-200">✦ ALIRAN ANGIN (SPEED FLOW)</div>
                 <div className="flex gap-2.5"><span className="w-4 text-center text-amber-200">◯</span><span>Lewati <b>cincin emas</b> untuk mulai Aliran & dorongan</span></div>
                 <div className="flex gap-2.5"><span className="w-4 text-center text-amber-200">✦</span><span>Terbang rendah untuk <b>Selancar Angin</b> & rawat kombo</span></div>
                 <div className="flex gap-2.5"><span className="w-4 text-center text-amber-200">⛰</span><span><b>Terelak tebing</b> nyaris senggol untuk bonus Aliran</span></div>
@@ -144,7 +144,7 @@ export default function App() {
               </div>
               <button
                 onClick={start}
-                className="rounded-full bg-white/90 px-10 py-4 text-base font-bold tracking-wider text-[#5a2a44] shadow-xl transition active:scale-95 hover:bg-white cursor-pointer"
+                className="rounded-full bg-white/90 px-[3.2cqw] py-[1.6cqh] text-[clamp(13px,2.6cqh,16px)] font-bold tracking-wider text-[#5a2a44] shadow-xl transition active:scale-95 hover:bg-white cursor-pointer"
               >
                 Mulai Terbang
               </button>
@@ -155,14 +155,14 @@ export default function App() {
 
         {screen === 'over' && stats && (
           <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/20 px-8 text-center text-white backdrop-blur-[2px]">
-            <div className="anim-fadeup w-full max-w-[320px]">
-              <div className="text-xs font-semibold tracking-[0.4em] text-white/70">PERJALANAN BERAKHIR</div>
-              <h2 className="font-title mt-2 text-4xl font-bold">Sang Naga Beristirahat</h2>
-              <div className="mt-8 text-6xl font-bold">{stats.score}</div>
+            <div className="anim-fadeup w-full max-w-[420px]">
+              <div className="text-[clamp(9px,1.7cqh,12px)] font-semibold tracking-[0.4em] text-white/70">PERJALANAN BERAKHIR</div>
+              <h2 className="font-title mt-1 text-[clamp(22px,5.4cqh,36px)] font-bold">Sang Naga Beristirahat</h2>
+              <div className="mt-[3cqh] text-[clamp(34px,10cqh,60px)] font-bold leading-none">{stats.score}</div>
               <div className="mt-1 text-xs font-semibold tracking-widest text-white/70">
                 {newBest ? <span className="anim-breathe text-amber-200">✦ REKOR BARU ✦</span> : `REKOR · ${best}`}
               </div>
-              <div className="mt-8 grid grid-cols-4 gap-1.5 rounded-2xl bg-white/10 p-3.5 backdrop-blur-md">
+              <div className="mt-[3cqh] grid grid-cols-4 gap-1.5 rounded-2xl bg-white/10 p-3.5 backdrop-blur-md">
                 <Stat label="Jarak" value={`${stats.distance}m`} />
                 <Stat label="Cincin" value={stats.rings} />
                 <Stat label="Aliran" value={`×${stats.bestCombo}`} />
@@ -170,7 +170,7 @@ export default function App() {
               </div>
               <button
                 onClick={start}
-                className="mt-10 rounded-full bg-white/90 px-10 py-4 text-base font-bold tracking-wider text-[#5a2a44] shadow-xl transition active:scale-95 hover:bg-white cursor-pointer"
+                className="mt-[4cqh] rounded-full bg-white/90 px-[3.2cqw] py-[1.6cqh] text-[clamp(13px,2.6cqh,16px)] font-bold tracking-wider text-[#5a2a44] shadow-xl transition active:scale-95 hover:bg-white cursor-pointer"
               >
                 Terbang Lagi
               </button>
